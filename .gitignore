@@ -1,0 +1,14 @@
+# build
+build/
+*.o
+*.obj
+
+# EFI output
+image/EFI/BOOT/*.EFI
+
+# OVMF vars
+*.fd
+
+# temp
+*.log
+*.tmp
