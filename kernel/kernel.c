@@ -179,14 +179,26 @@ static void kernel_init_interrupt_core(CONSOLE *con) {
     console_printf(con, "      External IRQ lines masked.\n\n");
 }
 
-static void kernel_init_memory(CONSOLE *con, BOOT_INFO *boot_info, PMM_STATE *pmm) {
+static void kernel_init_memory(CONSOLE *con, BOOT_INFO *boot_info) {
     panic_set_stage("memory subsystem init");
 
     console_printf(con, "[2/5] Memory subsystem init...\n");
 
     dump_memory_map(con, boot_info);
-    pmm_init(pmm, boot_info);
-    pmm_dump(con, pmm);
+    
+    console_printf(con, "[PMM-DEBUG] memory_map=%p\n",
+                   (void*)(uintptr_t)boot_info->memory_map);
+    console_printf(con, "[PMM-DEBUG] memory_map_size=%u\n",
+                   (unsigned int)boot_info->memory_map_size);
+    console_printf(con, "[PMM-DEBUG] memory_descriptor_size=%u\n",
+                   (unsigned int)boot_info->memory_descriptor_size);
+    console_printf(con, "[PMM-DEBUG] scratch_phys=%p\n",
+                   (void*)(uintptr_t)boot_info->scratch_phys);
+    console_printf(con, "[PMM-DEBUG] scratch_size=%u\n",
+                   (unsigned int)boot_info->scratch_size);
+    
+    pmm_init(con, boot_info);
+    pmm_dump(con);
 
     console_printf(con, "      PMM initialized successfully.\n\n");
 }
@@ -226,13 +238,12 @@ static void kernel_init_input(CONSOLE *con) {
 
 static void kernel_init_shell(CONSOLE *con,
                               BOOT_INFO *boot_info,
-                              PMM_STATE *pmm,
                               SHELL *sh) {
     panic_set_stage("shell init");
 
     console_printf(con, "[5/5] Shell init...\n");
 
-    shell_init(sh, con, boot_info, pmm);
+    shell_init(sh, con, boot_info);
 
     console_printf(con, "      Mini shell ready.\n\n");
 }
@@ -266,7 +277,6 @@ void kernel_run_shell(SHELL *sh) {
 __attribute__((noreturn))
 void kernel_main(BOOT_INFO *boot_info) {
     CONSOLE con;
-    PMM_STATE pmm;
     SHELL sh;
 
     if (!boot_info) {
@@ -291,10 +301,10 @@ void kernel_main(BOOT_INFO *boot_info) {
     kernel_print_runtime_plan(&con);
 
     kernel_init_interrupt_core(&con);
-    kernel_init_memory(&con, boot_info, &pmm);
+    kernel_init_memory(&con, boot_info);
     kernel_init_heap(&con, boot_info);
     kernel_init_input(&con);
-    kernel_init_shell(&con, boot_info, &pmm, &sh);
+    kernel_init_shell(&con, boot_info, &sh);
     kernel_prepare_timer(&con);
 
     kernel_run_shell(&sh);

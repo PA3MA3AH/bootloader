@@ -362,13 +362,14 @@ static void shell_print_mem(SHELL *sh) {
 }
 
 static void shell_print_pmm(SHELL *sh) {
-    PMM_STATE *p = sh->pmm;
 
     console_printf(sh->con, "PMM state:\n");
-    console_printf(sh->con, "  region count: %u\n", (unsigned int)p->region_count);
-    console_printf(sh->con, "  total pages:  %u\n", (unsigned int)p->total_pages);
-    console_printf(sh->con, "  free pages:   %u\n", (unsigned int)p->free_pages);
-    console_printf(sh->con, "  used pages:   %u\n", (unsigned int)(p->total_pages - p->free_pages));
+    console_printf(sh->con, "  region count: %u\n", (unsigned int)pmm_region_count());
+    console_printf(sh->con, "  managed pages:%u\n", (unsigned int)pmm_managed_pages());
+    console_printf(sh->con, "  bitmap bytes: %u\n", (unsigned int)pmm_bitmap_bytes());
+    console_printf(sh->con, "  total pages:  %u\n", (unsigned int)pmm_total_pages());
+    console_printf(sh->con, "  free pages:   %u\n", (unsigned int)pmm_free_pages());
+    console_printf(sh->con, "  used pages:   %u\n", (unsigned int)pmm_used_pages());
 }
 
 static void shell_print_kmem(SHELL *sh) {
@@ -767,10 +768,9 @@ static void shell_execute(SHELL *sh) {
     console_printf(sh->con, "Type 'help' for available commands.\n");
 }
 
-void shell_init(SHELL *sh, CONSOLE *con, BOOT_INFO *boot_info, PMM_STATE *pmm) {
+void shell_init(SHELL *sh, CONSOLE *con, BOOT_INFO *boot_info) {
     sh->con = con;
     sh->boot_info = boot_info;
-    sh->pmm = pmm;
     g_pit_enabled = 0;
     g_history_count = 0;
     shell_history_reset_navigation();
