@@ -12,3 +12,4 @@ image/EFI/BOOT/*.EFI
 # temp
 *.log
 *.tmp
+disk.img
