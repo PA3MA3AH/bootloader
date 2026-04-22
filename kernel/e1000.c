@@ -94,8 +94,13 @@ static int g_rings_initialized = 0;
 static int g_device_initialized = 0;
 static int g_device_present = 0;
 static uint32_t g_tx_tail_index = 0;
+static uint32_t g_rx_next_index = 0;
 
 static E1000_INFO g_e1000_state;
+
+E1000_INFO *e1000_get_state(void) {
+    return &g_e1000_state;
+}
 
 static void mmio_write32(uint32_t mmio_base, uint32_t reg, uint32_t value) {
     volatile uint32_t *addr = (volatile uint32_t*)(uintptr_t)(mmio_base + reg);
@@ -493,6 +498,8 @@ static int e1000_setup_rx(E1000_INFO *info) {
         g_rx_desc[i].status = 0;
     }
 
+    g_rx_next_index = 0;
+
     mmio_write32(info->mmio_base, E1000_REG_RDBAL, (uint32_t)(uintptr_t)g_rx_desc);
     mmio_write32(info->mmio_base, E1000_REG_RDBAH, 0);
     mmio_write32(info->mmio_base, E1000_REG_RDLEN, ring_bytes);
@@ -680,6 +687,46 @@ int e1000_send_test_packet(E1000_INFO *info) {
     }
 
     return e1000_send_packet(info, frame, (uint16_t)sizeof(frame));
+}
+
+int e1000_recv_packet(E1000_INFO *info, void *buf, uint32_t buf_size, uint32_t *out_len) {
+    if (!info || !buf) {
+        return 0;
+    }
+    if (!g_rings_initialized) {
+        return 0;
+    }
+
+    uint32_t idx = g_rx_next_index;
+    volatile E1000_RX_DESC *desc = &g_rx_desc[idx];
+
+    if ((desc->status & 0x01U) == 0) {
+        /* Descriptor Done bit not set — ring is empty */
+        return 0;
+    }
+
+    uint32_t length = desc->length;
+    int copied = 0;
+    if (length > 0 && length <= buf_size) {
+        memory_copy(buf, g_rx_buffers + (idx * E1000_RX_BUF_SIZE), length);
+        copied = 1;
+    }
+
+    /* Hand the buffer back to the NIC */
+    desc->status = 0;
+
+    /* Advance RDT to this index so the NIC can reuse it */
+    mmio_write32(info->mmio_base, E1000_REG_RDT, idx);
+
+    g_rx_next_index = (idx + 1U) % E1000_RX_DESC_COUNT;
+
+    if (copied) {
+        if (out_len) *out_len = length;
+        return 1;
+    }
+
+    /* Oversized / zero — reported as no packet, descriptor recycled */
+    return 0;
 }
 
 int e1000_send_arp_request(E1000_INFO *info, const uint8_t target_ip[4]) {
