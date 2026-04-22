@@ -49,23 +49,26 @@ static uint16_t load_u16_be(const uint8_t *p) {
     return (uint16_t)((((uint16_t)p[0]) << 8) | (uint16_t)p[1]);
 }
 
-static uint32_t load_u32_be(const uint8_t *p) {
-    return ((uint32_t)p[0] << 24) |
-           ((uint32_t)p[1] << 16) |
-           ((uint32_t)p[2] << 8)  |
-            (uint32_t)p[3];
-}
-
 static void store_u16_be(uint8_t *p, uint16_t v) {
     p[0] = (uint8_t)((v >> 8) & 0xFF);
     p[1] = (uint8_t)(v & 0xFF);
 }
 
-static void store_u32_be(uint8_t *p, uint32_t v) {
-    p[0] = (uint8_t)((v >> 24) & 0xFF);
-    p[1] = (uint8_t)((v >> 16) & 0xFF);
-    p[2] = (uint8_t)((v >> 8)  & 0xFF);
-    p[3] = (uint8_t)(v & 0xFF);
+/* clang in freestanding mode still emits implicit calls to memset/memcpy
+ * for things like `T x = {0};` on aggregates. Provide minimal fallbacks. */
+void *memset(void *dst, int c, unsigned long n) {
+    uint8_t *d = (uint8_t *)dst;
+    unsigned long i;
+    for (i = 0; i < n; i++) d[i] = (uint8_t)c;
+    return dst;
+}
+
+void *memcpy(void *dst, const void *src, unsigned long n) {
+    uint8_t *d = (uint8_t *)dst;
+    const uint8_t *s = (const uint8_t *)src;
+    unsigned long i;
+    for (i = 0; i < n; i++) d[i] = s[i];
+    return dst;
 }
 
 /* RFC 1071 internet checksum, returns network-byte-order value
