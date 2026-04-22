@@ -61,9 +61,18 @@ int e1000_probe(E1000_INFO *info);
 int e1000_init(E1000_INFO *info);
 int e1000_init_rings(E1000_INFO *info);
 
+/* Returns a pointer to the driver's persistent E1000_INFO singleton.
+ * Useful when other subsystems (network stack) need a stable pointer. */
+E1000_INFO *e1000_get_state(void);
+
 int e1000_send_packet(E1000_INFO *info, const void *data, uint16_t length);
 int e1000_send_test_packet(E1000_INFO *info);
 int e1000_send_arp_request(E1000_INFO *info, const uint8_t target_ip[4]);
+
+/* Polled receive. Returns 1 if a packet was returned in `buf`, 0 if the RX
+ * ring is empty or the device isn't ready. `out_len` receives the packet
+ * length on success. Packets larger than `buf_size` are dropped. */
+int e1000_recv_packet(E1000_INFO *info, void *buf, uint32_t buf_size, uint32_t *out_len);
 
 void e1000_refresh(E1000_INFO *info);
 void e1000_print_info(CONSOLE *con, const E1000_INFO *info);
