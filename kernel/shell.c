@@ -8,6 +8,7 @@
 #include "pci.h"
 #include "e1000.h"
 #include "net.h"
+#include "ahci.h"
 
 #define SHELL_PIT_HZ 100
 #define SHELL_HISTORY_MAX 16
@@ -326,6 +327,11 @@ static void shell_print_help(SHELL *sh) {
     console_printf(sh->con, "  ktest             - basic kmalloc/kfree test\n");
     console_printf(sh->con, "  pci               - scan PCI bus and print devices\n");
     console_printf(sh->con, "  pcidump b d f     - dump one PCI device config summary\n");
+    console_printf(sh->con, "  fatinfo [port]   - parse FAT32 boot sector on AHCI disk\n");
+    console_printf(sh->con, "  ahci              - probe/init AHCI SATA controller\n");
+    console_printf(sh->con, "  ahciports         - list AHCI ports and attached devices\n");
+    console_printf(sh->con, "  ahciid <port>     - IDENTIFY DEVICE on one SATA port\n");
+    console_printf(sh->con, "  readlba p lba n   - read 1..8 sectors from SATA disk\n");
     console_printf(sh->con, "  e1000             - probe and init Intel e1000/e1000e device\n");
     console_printf(sh->con, "  e1000dump         - print extended e1000 debug registers\n");
     console_printf(sh->con, "  e1000rings        - initialize e1000 RX/TX rings\n");
@@ -852,6 +858,297 @@ static void shell_do_reboot(void) {
     }
 }
 
+static void shell_hex_dump(SHELL *sh, const uint8_t *buf, uint32_t bytes) {
+    uint32_t i, j;
+
+    for (i = 0; i < bytes; i += 16) {
+        console_printf(sh->con, "%x: ", (unsigned int)i);
+
+        for (j = 0; j < 16; j++) {
+            if (i + j < bytes) {
+                uint8_t b = buf[i + j];
+                console_printf(sh->con, "%c%c ",
+                    "0123456789ABCDEF"[b >> 4],
+                    "0123456789ABCDEF"[b & 0x0F]);
+            } else {
+                console_printf(sh->con, "   ");
+            }
+        }
+
+        console_printf(sh->con, " |");
+
+        for (j = 0; j < 16 && (i + j) < bytes; j++) {
+            uint8_t c = buf[i + j];
+            if (c >= 32 && c <= 126) {
+                console_printf(sh->con, "%c", c);
+            } else {
+                console_printf(sh->con, ".");
+            }
+        }
+
+        console_printf(sh->con, "|\n");
+    }
+}
+
+static void shell_run_ahci(SHELL *sh) {
+    AHCI_INFO info;
+
+    if (!ahci_probe(&info)) {
+        console_printf(sh->con, "ahci: controller not found\n");
+        return;
+    }
+
+    console_printf(sh->con, "ahci: controller found at %u:%u.%u, initializing...\n",
+                   (unsigned int)info.bus,
+                   (unsigned int)info.device,
+                   (unsigned int)info.function);
+
+    if (!ahci_init(&info)) {
+        console_printf(sh->con, "ahci: init failed\n");
+        return;
+    }
+
+    ahci_print_info(sh->con, &info);
+}
+
+static void shell_run_ahciports(SHELL *sh) {
+    AHCI_INFO *info = ahci_get_state();
+
+    if (!info->initialized) {
+        if (!ahci_init(info)) {
+            console_printf(sh->con, "ahciports: init failed or controller not found\n");
+            return;
+        }
+    }
+
+    ahci_print_info(sh->con, info);
+    ahci_print_ports(sh->con);
+}
+
+static void shell_run_ahciid(SHELL *sh, const char *args) {
+    uint32_t port_no;
+    AHCI_PORT_INFO pi;
+
+    if (!args || !str_to_u32(args, &port_no)) {
+        console_printf(sh->con, "Usage: ahciid <port>\n");
+        return;
+    }
+
+    if (!ahci_get_state()->initialized) {
+        if (!ahci_init(ahci_get_state())) {
+            console_printf(sh->con, "ahciid: init failed or controller not found\n");
+            return;
+        }
+    }
+
+    if (!ahci_identify(port_no, &pi)) {
+        console_printf(sh->con, "ahciid: identify failed on port %u\n",
+                       (unsigned int)port_no);
+        return;
+    }
+
+    console_printf(sh->con, "port %u:\n", (unsigned int)port_no);
+    console_printf(sh->con, "  implemented:    %u\n", (unsigned int)pi.implemented);
+    console_printf(sh->con, "  present:        %u\n", (unsigned int)pi.device_present);
+    console_printf(sh->con, "  SATA:           %u\n", (unsigned int)pi.sata);
+    console_printf(sh->con, "  ATAPI:          %u\n", (unsigned int)pi.atapi);
+    console_printf(sh->con, "  signature:      %x\n", (unsigned int)pi.sig);
+    console_printf(sh->con, "  ssts:           %x\n", (unsigned int)pi.ssts);
+    console_printf(sh->con, "  tfd:            %x\n", (unsigned int)pi.tfd);
+
+    if (pi.model[0]) {
+        console_printf(sh->con, "  model:          %s\n", pi.model);
+    }
+    if (pi.serial[0]) {
+        console_printf(sh->con, "  serial:         %s\n", pi.serial);
+    }
+    if (pi.firmware[0]) {
+        console_printf(sh->con, "  firmware:       %s\n", pi.firmware);
+    }
+
+    console_printf(sh->con, "  lba28 sectors:  %u\n", (unsigned int)pi.sectors_28);
+    console_printf(sh->con, "  lba48 sectors:  %u\n", (unsigned int)(pi.sectors_48 & 0xFFFFFFFFULL));
+}
+
+static void shell_run_readlba(SHELL *sh, const char *args) {
+    uint32_t port_no;
+    uint32_t lba;
+    uint32_t count;
+    uint8_t buf[AHCI_MAX_READ_SECTORS * 512];
+
+    if (!parse_three_u32_args(args, &port_no, &lba, &count)) {
+        console_printf(sh->con, "Usage: readlba <port> <lba> <count>\n");
+        console_printf(sh->con, "count must be 1..8\n");
+        return;
+    }
+
+    if (count == 0 || count > AHCI_MAX_READ_SECTORS) {
+        console_printf(sh->con, "readlba: count must be 1..8\n");
+        return;
+    }
+
+    if (!ahci_get_state()->initialized) {
+        if (!ahci_init(ahci_get_state())) {
+            console_printf(sh->con, "readlba: init failed or controller not found\n");
+            return;
+        }
+    }
+
+    if (!ahci_read(port_no, (uint64_t)lba, count, buf)) {
+        console_printf(sh->con, "readlba: read failed (port=%u lba=%u count=%u)\n",
+                       (unsigned int)port_no,
+                       (unsigned int)lba,
+                       (unsigned int)count);
+        return;
+    }
+
+    console_printf(sh->con, "readlba: ok (port=%u lba=%u count=%u)\n",
+                   (unsigned int)port_no,
+                   (unsigned int)lba,
+                   (unsigned int)count);
+
+    shell_hex_dump(sh, buf, count * 512U);
+}
+
+typedef struct __attribute__((packed)) {
+    uint8_t  jmp_boot[3];
+    uint8_t  oem_name[8];
+    uint16_t bytes_per_sector;
+    uint8_t  sectors_per_cluster;
+    uint16_t reserved_sector_count;
+    uint8_t  num_fats;
+    uint16_t root_entry_count;
+    uint16_t total_sectors_16;
+    uint8_t  media;
+    uint16_t fat_size_16;
+    uint16_t sectors_per_track;
+    uint16_t num_heads;
+    uint32_t hidden_sectors;
+    uint32_t total_sectors_32;
+
+    uint32_t fat_size_32;
+    uint16_t ext_flags;
+    uint16_t fs_version;
+    uint32_t root_cluster;
+    uint16_t fs_info;
+    uint16_t backup_boot_sector;
+    uint8_t  reserved[12];
+
+    uint8_t  drive_number;
+    uint8_t  reserved1;
+    uint8_t  boot_signature;
+    uint32_t volume_id;
+    uint8_t  volume_label[11];
+    uint8_t  fs_type[8];
+} FAT32_BPB;
+
+static void print_fixed_string(CONSOLE *con, const uint8_t *s, uint32_t len) {
+    uint32_t i;
+    for (i = 0; i < len; i++) {
+        uint8_t c = s[i];
+        if (c == 0) {
+            break;
+        }
+        if (c >= 32 && c <= 126) {
+            console_printf(con, "%c", c);
+        } else {
+            console_printf(con, ".");
+        }
+    }
+}
+
+static void shell_run_fatinfo(SHELL *sh, const char *args) {
+    uint32_t port_no = 0;
+    uint8_t sector[512];
+    FAT32_BPB *bpb;
+    uint32_t total_sectors;
+    uint32_t fat_size;
+    uint32_t data_sectors;
+    uint32_t cluster_count;
+    uint32_t first_data_sector;
+
+    if (args && *args) {
+        if (!str_to_u32(args, &port_no)) {
+            console_printf(sh->con, "Usage: fatinfo [port]\n");
+            return;
+        }
+    }
+
+    if (!ahci_get_state()->initialized) {
+        if (!ahci_init(ahci_get_state())) {
+            console_printf(sh->con, "fatinfo: AHCI init failed or controller not found\n");
+            return;
+        }
+    }
+
+    if (!ahci_read(port_no, 0, 1, sector)) {
+        console_printf(sh->con, "fatinfo: failed to read boot sector from port %u\n",
+                       (unsigned int)port_no);
+        return;
+    }
+
+    bpb = (FAT32_BPB*)sector;
+
+    console_printf(sh->con, "FAT boot sector (port %u):\n", (unsigned int)port_no);
+
+    console_printf(sh->con, "  OEM:                  ");
+    print_fixed_string(sh->con, bpb->oem_name, 8);
+    console_printf(sh->con, "\n");
+
+    console_printf(sh->con, "  bytes/sector:         %u\n",
+                   (unsigned int)bpb->bytes_per_sector);
+    console_printf(sh->con, "  sectors/cluster:      %u\n",
+                   (unsigned int)bpb->sectors_per_cluster);
+    console_printf(sh->con, "  reserved sectors:     %u\n",
+                   (unsigned int)bpb->reserved_sector_count);
+    console_printf(sh->con, "  FAT count:            %u\n",
+                   (unsigned int)bpb->num_fats);
+
+    console_printf(sh->con, "  FAT32 fat_size_32:    %u\n",
+                   (unsigned int)bpb->fat_size_32);
+    console_printf(sh->con, "  root cluster:         %u\n",
+                   (unsigned int)bpb->root_cluster);
+    console_printf(sh->con, "  fsinfo sector:        %u\n",
+                   (unsigned int)bpb->fs_info);
+    console_printf(sh->con, "  backup boot sector:   %u\n",
+                   (unsigned int)bpb->backup_boot_sector);
+
+    console_printf(sh->con, "  volume label:         ");
+    print_fixed_string(sh->con, bpb->volume_label, 11);
+    console_printf(sh->con, "\n");
+
+    console_printf(sh->con, "  fs type field:        ");
+    print_fixed_string(sh->con, bpb->fs_type, 8);
+    console_printf(sh->con, "\n");
+
+    total_sectors = bpb->total_sectors_16 ? bpb->total_sectors_16 : bpb->total_sectors_32;
+    fat_size = bpb->fat_size_16 ? bpb->fat_size_16 : bpb->fat_size_32;
+
+    first_data_sector = bpb->reserved_sector_count + ((uint32_t)bpb->num_fats * fat_size);
+    data_sectors = total_sectors - first_data_sector;
+    cluster_count = data_sectors / bpb->sectors_per_cluster;
+
+    console_printf(sh->con, "  total sectors:        %u\n", (unsigned int)total_sectors);
+    console_printf(sh->con, "  first data sector:    %u\n", (unsigned int)first_data_sector);
+    console_printf(sh->con, "  cluster count:        %u\n", (unsigned int)cluster_count);
+
+    if (sector[510] == 0x55 && sector[511] == 0xAA) {
+        console_printf(sh->con, "  boot signature:       55 AA (valid)\n");
+    } else {
+        console_printf(sh->con, "  boot signature:       %x %x (unexpected)\n",
+                       (unsigned int)sector[510],
+                       (unsigned int)sector[511]);
+    }
+
+    if (bpb->bytes_per_sector != 512) {
+        console_printf(sh->con, "[WARN] bytes_per_sector is not 512\n");
+    }
+
+    if (bpb->fat_size_32 == 0) {
+        console_printf(sh->con, "[WARN] fat_size_32 is zero, this may not be FAT32\n");
+    }
+}
+
 static void shell_execute(SHELL *sh) {
     if (sh->length == 0) {
         return;
@@ -923,6 +1220,36 @@ static void shell_execute(SHELL *sh) {
 
     if (str_starts_with(sh->input, "pcidump ")) {
         shell_run_pcidump(sh, sh->input + 8);
+        return;
+    }
+
+    if (str_eq(sh->input, "fatinfo")) {
+        shell_run_fatinfo(sh, 0);
+        return;
+    }
+    
+    if (str_starts_with(sh->input, "fatinfo ")) {
+        shell_run_fatinfo(sh, sh->input + 8);
+        return;
+    }
+
+    if (str_eq(sh->input, "ahci")) {
+        shell_run_ahci(sh);
+        return;
+    }
+
+    if (str_eq(sh->input, "ahciports")) {
+        shell_run_ahciports(sh);
+        return;
+    }
+
+    if (str_starts_with(sh->input, "ahciid ")) {
+        shell_run_ahciid(sh, sh->input + 7);
+        return;
+    }
+
+    if (str_starts_with(sh->input, "readlba ")) {
+        shell_run_readlba(sh, sh->input + 8);
         return;
     }
 

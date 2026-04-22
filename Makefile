@@ -40,7 +40,8 @@ KERNEL_OBJS := \
 		kernel/pic.o \
 		kernel/pit.o \
 		kernel/exceptions.o \
-		kernel/isr_stubs.o
+		kernel/isr_stubs.o \
+		kernel/ahci.o \
 
 .PHONY: all build bootloader kernel run clean rebuild
 
@@ -131,22 +132,28 @@ kernel/exceptions.o: kernel/exceptions.c | build
 kernel/isr_stubs.o: kernel/isr_stubs.asm | build
 		$(NASM) $(NASMFLAGS) kernel/isr_stubs.asm -o $@
 
+kernel/ahci.o: kernel/ahci.c kernel/ahci.h | build
+		$(CC) $(KERNEL_CFLAGS) -c kernel/ahci.c -o $@
+
 image/EFI/BOOT/KERNEL.ELF: $(KERNEL_OBJS)
 		$(LD_KERNEL) $(KERNEL_LDFLAGS) $(KERNEL_OBJS)
 
 run: all $(OVMF_VARS_DST)
-		qemu-system-x86_64 \
-				-machine q35 \
-				-m 512M \
-				-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
-				-drive if=pflash,format=raw,file=$(OVMF_VARS_DST) \
-				-drive format=raw,file=fat:rw:image \
-				-netdev user,id=net0 \
-				-device e1000,netdev=net0,mac=52:54:00:12:34:56 \
-				-object filter-dump,id=fd0,netdev=net0,file=qemu-net.pcap \
-				-no-reboot -no-shutdown \
-				-d int,cpu_reset,guest_errors \
-				-D qemu.log
+	qemu-system-x86_64 \
+		-machine q35 \
+		-m 512M \
+		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
+		-drive if=pflash,format=raw,file=$(OVMF_VARS_DST) \
+		-drive id=disk0,if=none,file=disk.img,format=raw \
+		-device ich9-ahci,id=ahci \
+		-device ide-hd,drive=disk0,bus=ahci.0 \
+		-drive format=raw,file=fat:rw:image \
+		-netdev tap,id=net0,ifname=tap0,script=no,downscript=no \
+		-device e1000,netdev=net0,mac=52:54:00:12:34:56 \
+		-object filter-dump,id=fd0,netdev=net0,file=qemu-net.pcap \
+		-no-reboot -no-shutdown \
+		-d int,cpu_reset,guest_errors \
+		-D qemu.log
 
 rebuild: clean all
 

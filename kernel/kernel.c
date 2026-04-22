@@ -10,6 +10,7 @@
 #include "crashlog.h"
 #include "kheap.h"
 #include "vmm.h"
+#include "ahci.h"
 
 #define KERNEL_PIT_HZ 100
 
