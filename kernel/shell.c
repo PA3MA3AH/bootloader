@@ -7,6 +7,7 @@
 #include "kheap.h"
 #include "pci.h"
 #include "e1000.h"
+#include "net.h"
 
 #define SHELL_PIT_HZ 100
 #define SHELL_HISTORY_MAX 16
@@ -329,7 +330,15 @@ static void shell_print_help(SHELL *sh) {
     console_printf(sh->con, "  e1000dump         - print extended e1000 debug registers\n");
     console_printf(sh->con, "  e1000rings        - initialize e1000 RX/TX rings\n");
     console_printf(sh->con, "  e1000tx           - send one test broadcast Ethernet frame\n");
-    console_printf(sh->con, "  arpwho a b c d    - send ARP request to target IPv4\n");
+    console_printf(sh->con, "  arpwho a b c d    - send ARP request to target IPv4 (raw)\n");
+    console_printf(sh->con, "  net               - bring up the IP stack on top of e1000\n");
+    console_printf(sh->con, "  ipcfg             - print current IP configuration\n");
+    console_printf(sh->con, "  ipset ip mask gw  - set local IPv4 / netmask / gateway\n");
+    console_printf(sh->con, "  dnsset ip         - set DNS server IPv4 address\n");
+    console_printf(sh->con, "  arp               - show ARP cache\n");
+    console_printf(sh->con, "  arpclear          - empty the ARP cache\n");
+    console_printf(sh->con, "  ping host         - ICMP echo to IPv4 or hostname (4 packets)\n");
+    console_printf(sh->con, "  resolve name      - DNS A-record lookup\n");
     console_printf(sh->con, "  ticks             - show PIT status and tick counter\n");
     console_printf(sh->con, "  uptime            - show uptime based on PIT ticks\n");
     console_printf(sh->con, "  piton             - enable PIT IRQ0 timer\n");
@@ -568,6 +577,204 @@ static void shell_run_arpwho(SHELL *sh, const char *args) {
     e1000_dump_registers(sh->con, &info);
 }
 
+/* ============================================================
+ *  Network stack commands
+ * ============================================================ */
+
+static int shell_ensure_pit_running(SHELL *sh) {
+    if (timer_hz() != 0) {
+        return 1;
+    }
+    crashlog_set_stage("shell runtime");
+    crashlog_set_action("net auto-piton", "before timer_start");
+    interrupts_disable();
+    timer_start(SHELL_PIT_HZ);
+    interrupts_enable();
+    g_pit_enabled = 1;
+    crashlog_mark_stable();
+    if (sh) {
+        console_printf(sh->con, "(auto) PIT timer enabled at %u Hz for network stack\n",
+                       (unsigned int)SHELL_PIT_HZ);
+    }
+    return 1;
+}
+
+static int shell_ensure_net(SHELL *sh, const char *cmd) {
+    E1000_INFO *nic = e1000_get_state();
+
+    if (!nic->present) {
+        if (!e1000_probe(nic)) {
+            console_printf(sh->con, "%s: e1000 device not found\n", cmd);
+            return 0;
+        }
+    }
+    if (!nic->rings_ready) {
+        if (!e1000_init_rings(nic)) {
+            console_printf(sh->con, "%s: e1000 init failed\n", cmd);
+            return 0;
+        }
+    }
+
+    shell_ensure_pit_running(sh);
+
+    if (!net_init(nic)) {
+        console_printf(sh->con, "%s: net_init failed\n", cmd);
+        return 0;
+    }
+    return 1;
+}
+
+static void shell_run_net(SHELL *sh) {
+    if (!shell_ensure_net(sh, "net")) {
+        return;
+    }
+    console_printf(sh->con, "net: stack ready\n");
+    net_print_config(sh->con);
+}
+
+static void shell_run_ipcfg(SHELL *sh) {
+    net_print_config(sh->con);
+}
+
+static void shell_run_ipset(SHELL *sh, const char *args) {
+    /* Usage: ipset <a.b.c.d> <netmask a.b.c.d> <gateway a.b.c.d> */
+    char ip_s[24];
+    char mask_s[24];
+    char gw_s[24];
+    uint32_t i = 0;
+    uint32_t j = 0;
+
+    if (!args) {
+        console_printf(sh->con, "Usage: ipset <ip> <netmask> <gateway>\n");
+        return;
+    }
+
+    while (args[i] == ' ') i++;
+    j = 0;
+    while (args[i] && args[i] != ' ' && j + 1 < sizeof(ip_s)) ip_s[j++] = args[i++];
+    ip_s[j] = '\0';
+    while (args[i] == ' ') i++;
+    j = 0;
+    while (args[i] && args[i] != ' ' && j + 1 < sizeof(mask_s)) mask_s[j++] = args[i++];
+    mask_s[j] = '\0';
+    while (args[i] == ' ') i++;
+    j = 0;
+    while (args[i] && args[i] != ' ' && j + 1 < sizeof(gw_s)) gw_s[j++] = args[i++];
+    gw_s[j] = '\0';
+
+    uint8_t ip[4], mask[4], gw[4];
+    if (!net_parse_ipv4(ip_s, ip) ||
+        !net_parse_ipv4(mask_s, mask) ||
+        !net_parse_ipv4(gw_s, gw)) {
+        console_printf(sh->con, "Usage: ipset <ip> <netmask> <gateway>\n");
+        return;
+    }
+
+    if (!shell_ensure_net(sh, "ipset")) return;
+    net_set_ip(ip, mask, gw);
+    net_arp_clear();
+    net_print_config(sh->con);
+}
+
+static void shell_run_dnsset(SHELL *sh, const char *args) {
+    char buf[24];
+    uint32_t i = 0;
+    uint32_t j = 0;
+
+    if (!args) {
+        console_printf(sh->con, "Usage: dnsset <ip>\n");
+        return;
+    }
+    while (args[i] == ' ') i++;
+    while (args[i] && args[i] != ' ' && j + 1 < sizeof(buf)) buf[j++] = args[i++];
+    buf[j] = '\0';
+
+    uint8_t ip[4];
+    if (!net_parse_ipv4(buf, ip)) {
+        console_printf(sh->con, "Usage: dnsset <ip>\n");
+        return;
+    }
+    if (!shell_ensure_net(sh, "dnsset")) return;
+    net_set_dns(ip);
+    net_print_config(sh->con);
+}
+
+static void shell_run_arp(SHELL *sh) {
+    net_arp_print(sh->con);
+}
+
+static void shell_run_arpclear(SHELL *sh) {
+    net_arp_clear();
+    console_printf(sh->con, "ARP cache cleared\n");
+}
+
+static void shell_run_ping(SHELL *sh, const char *args) {
+    char host[64];
+    uint32_t i = 0;
+    uint32_t j = 0;
+    uint8_t ip[4];
+
+    if (!args) {
+        console_printf(sh->con, "Usage: ping <host-or-ip>\n");
+        return;
+    }
+    while (args[i] == ' ') i++;
+    while (args[i] && args[i] != ' ' && j + 1 < sizeof(host)) host[j++] = args[i++];
+    host[j] = '\0';
+
+    if (host[0] == '\0') {
+        console_printf(sh->con, "Usage: ping <host-or-ip>\n");
+        return;
+    }
+
+    if (!shell_ensure_net(sh, "ping")) return;
+
+    if (!net_parse_ipv4(host, ip)) {
+        console_printf(sh->con, "ping: resolving %s ...\n", host);
+        if (!net_dns_resolve(sh->con, host, ip, 2000)) {
+            console_printf(sh->con, "ping: cannot resolve '%s'\n", host);
+            return;
+        }
+        console_printf(sh->con, "ping: %s -> %u.%u.%u.%u\n",
+                       host,
+                       (unsigned int)ip[0], (unsigned int)ip[1],
+                       (unsigned int)ip[2], (unsigned int)ip[3]);
+    }
+
+    net_ping(sh->con, ip, 4, 1000, 0);
+}
+
+static void shell_run_resolve(SHELL *sh, const char *args) {
+    char host[64];
+    uint32_t i = 0;
+    uint32_t j = 0;
+    uint8_t ip[4];
+
+    if (!args) {
+        console_printf(sh->con, "Usage: resolve <hostname>\n");
+        return;
+    }
+    while (args[i] == ' ') i++;
+    while (args[i] && args[i] != ' ' && j + 1 < sizeof(host)) host[j++] = args[i++];
+    host[j] = '\0';
+
+    if (host[0] == '\0') {
+        console_printf(sh->con, "Usage: resolve <hostname>\n");
+        return;
+    }
+
+    if (!shell_ensure_net(sh, "resolve")) return;
+
+    if (net_dns_resolve(sh->con, host, ip, 2000)) {
+        console_printf(sh->con, "%s -> %u.%u.%u.%u\n",
+                       host,
+                       (unsigned int)ip[0], (unsigned int)ip[1],
+                       (unsigned int)ip[2], (unsigned int)ip[3]);
+    } else {
+        console_printf(sh->con, "resolve: lookup failed for '%s'\n", host);
+    }
+}
+
 static void shell_print_ticks(SHELL *sh) {
     console_printf(sh->con, "PIT status: %s\n", g_pit_enabled ? "enabled" : "disabled");
     console_printf(sh->con, "PIT hz:     %u\n", (unsigned int)timer_hz());
@@ -741,6 +948,54 @@ static void shell_execute(SHELL *sh) {
 
     if (str_starts_with(sh->input, "arpwho ")) {
         shell_run_arpwho(sh, sh->input + 7);
+        shell_reset_input(sh);
+        return;
+    }
+
+    if (str_eq(sh->input, "net")) {
+        shell_run_net(sh);
+        shell_reset_input(sh);
+        return;
+    }
+
+    if (str_eq(sh->input, "ipcfg")) {
+        shell_run_ipcfg(sh);
+        shell_reset_input(sh);
+        return;
+    }
+
+    if (str_starts_with(sh->input, "ipset ")) {
+        shell_run_ipset(sh, sh->input + 6);
+        shell_reset_input(sh);
+        return;
+    }
+
+    if (str_starts_with(sh->input, "dnsset ")) {
+        shell_run_dnsset(sh, sh->input + 7);
+        shell_reset_input(sh);
+        return;
+    }
+
+    if (str_eq(sh->input, "arp")) {
+        shell_run_arp(sh);
+        shell_reset_input(sh);
+        return;
+    }
+
+    if (str_eq(sh->input, "arpclear")) {
+        shell_run_arpclear(sh);
+        shell_reset_input(sh);
+        return;
+    }
+
+    if (str_starts_with(sh->input, "ping ")) {
+        shell_run_ping(sh, sh->input + 5);
+        shell_reset_input(sh);
+        return;
+    }
+
+    if (str_starts_with(sh->input, "resolve ")) {
+        shell_run_resolve(sh, sh->input + 8);
         return;
     }
 
