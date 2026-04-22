@@ -24,7 +24,7 @@ typedef struct {
 
 typedef struct {
     uint32_t type;
-    uint32_t pad;              // ← ДОБАВИТЬ!
+    uint32_t pad;
     uint64_t physical_start;
     uint64_t virtual_start;
     uint64_t number_of_pages;
@@ -177,6 +177,7 @@ static uint64_t pmm_region_free_pages_internal(PMM_STATE *pmm, PMM_REGION *regio
 
 void pmm_init(CONSOLE *con, BOOT_INFO *boot_info) {
     PMM_STATE *pmm = &g_pmm;
+    (void)con;
 
     for (uint64_t i = 0; i < PMM_MAX_REGIONS; i++) {
         pmm->regions[i].base = 0;
@@ -215,28 +216,14 @@ void pmm_init(CONSOLE *con, BOOT_INFO *boot_info) {
     for (uint64_t i = 0; i < entry_count; i++) {
         KERNEL_EFI_MEMORY_DESCRIPTOR *desc =
             (KERNEL_EFI_MEMORY_DESCRIPTOR*)(map_base + i * boot_info->memory_descriptor_size);
-    
-        if (i < 8) {
-            console_printf(con,
-                "[PMM-DESC %u] type=%u phys=%p pages=%u attr=%p\n",
-                (unsigned int)i,
-                (unsigned int)desc->type,
-                (void*)(uintptr_t)desc->physical_start,
-                (unsigned int)desc->number_of_pages,
-                (void*)(uintptr_t)desc->attribute);
-        }
-    
-        if (!desc) {
+
+        if (desc->type != EFI_CONVENTIONAL_MEMORY || desc->number_of_pages == 0) {
             continue;
         }
-    
-        if (desc->type != 7 || desc->number_of_pages == 0) {
-            continue;
-        }
-    
+
         uint64_t start_page = desc->physical_start / PMM_PAGE_SIZE;
         uint64_t end_page   = start_page + desc->number_of_pages;
-    
+
         if (end_page > highest_page_plus_one) {
             highest_page_plus_one = end_page;
         }
@@ -250,52 +237,48 @@ void pmm_init(CONSOLE *con, BOOT_INFO *boot_info) {
     if (required_bitmap_bytes == 0) {
         return;
     }
-    
+
     uint64_t scratch_base = boot_info->scratch_phys;
     uint64_t scratch_end  = boot_info->scratch_phys + boot_info->scratch_size;
-    
+
     uint64_t bitmap_base = scratch_base;
-    
-    // если memory map лежит в scratch, кладём bitmap ПОСЛЕ неё
+
     if (boot_info->memory_map >= scratch_base && boot_info->memory_map < scratch_end) {
         uint64_t map_end = boot_info->memory_map + boot_info->memory_map_size;
         bitmap_base = align_up_u64(map_end, 16);
     }
-    
+
     uint64_t total_bitmap_bytes = required_bitmap_bytes * 2;
     if (bitmap_base + total_bitmap_bytes > scratch_end) {
         return;
     }
-    
+
     pmm->managed_pages = highest_page_plus_one;
     pmm->bitmap_bytes  = required_bitmap_bytes;
     pmm->usable_bitmap = (uint8_t*)(uintptr_t)bitmap_base;
     pmm->used_bitmap   = pmm->usable_bitmap + required_bitmap_bytes;
-    pmm->alloc_hint    = 0;
-    
+    pmm->alloc_hint    = 1; // не выдаём страницу 0
+
     memfill_u8(pmm->usable_bitmap, 0x00, required_bitmap_bytes);
     memfill_u8(pmm->used_bitmap,   0x00, required_bitmap_bytes);
 
     for (uint64_t i = 0; i < entry_count; i++) {
         KERNEL_EFI_MEMORY_DESCRIPTOR *desc =
             (KERNEL_EFI_MEMORY_DESCRIPTOR*)(map_base + i * boot_info->memory_descriptor_size);
-    
-        if (!desc) {
+
+        if (desc->type != EFI_CONVENTIONAL_MEMORY || desc->number_of_pages == 0) {
             continue;
         }
-    
-        if (desc->type != 7 || desc->number_of_pages == 0) {
-            continue;
-        }
-    
+
         uint64_t region_start = desc->physical_start;
         uint64_t region_end   = region_start + desc->number_of_pages * PMM_PAGE_SIZE;
-    
+
         pmm_add_region(pmm, region_start, desc->number_of_pages);
         pmm_mark_usable(pmm, region_start, region_end);
     }
 
     PMM_RESERVED_RANGE reserved[] = {
+        { 0, PMM_PAGE_SIZE }, // страница 0 всегда reserved
         {
             boot_info->kernel_phys_base,
             boot_info->kernel_phys_base + boot_info->kernel_reserved_size
@@ -351,7 +334,7 @@ void *pmm_alloc_pages(uint64_t count) {
     pass_start[0] = pmm->alloc_hint;
     pass_end[0]   = pmm->managed_pages;
 
-    pass_start[1] = 0;
+    pass_start[1] = 1; // не начинаем с нулевой страницы
     pass_end[1]   = pmm->alloc_hint;
 
     for (int pass = 0; pass < 2; pass++) {
@@ -372,10 +355,11 @@ void *pmm_alloc_pages(uint64_t count) {
             for (uint64_t i = 0; i < count; i++) {
                 uint64_t page = start_page + i;
 
-                if (!bitmap_test(pmm->usable_bitmap, page) ||
+                if (page == 0 ||
+                    page >= pmm->managed_pages ||
+                    !bitmap_test(pmm->usable_bitmap, page) ||
                     bitmap_test(pmm->used_bitmap, page)) {
                     ok = 0;
-                    start_page += i;
                     break;
                 }
             }
@@ -388,11 +372,15 @@ void *pmm_alloc_pages(uint64_t count) {
                 bitmap_set(pmm->used_bitmap, start_page + i);
             }
 
-            pmm->free_pages -= count;
-            pmm->alloc_hint = start_page + count;
+            if (pmm->free_pages >= count) {
+                pmm->free_pages -= count;
+            } else {
+                pmm->free_pages = 0;
+            }
 
+            pmm->alloc_hint = start_page + count;
             if (pmm->alloc_hint >= pmm->managed_pages) {
-                pmm->alloc_hint = 0;
+                pmm->alloc_hint = 1;
             }
 
             return (void*)(uintptr_t)(start_page * PMM_PAGE_SIZE);
@@ -417,7 +405,7 @@ void pmm_free_page(void *ptr) {
 
     uint64_t page = addr / PMM_PAGE_SIZE;
 
-    if (page >= pmm->managed_pages) {
+    if (page == 0 || page >= pmm->managed_pages) {
         return;
     }
 

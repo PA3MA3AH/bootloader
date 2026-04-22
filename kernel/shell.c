@@ -319,6 +319,7 @@ static void shell_print_help(SHELL *sh) {
     console_printf(sh->con, "  clear             - clear screen\n");
     console_printf(sh->con, "  mem               - show boot memory info\n");
     console_printf(sh->con, "  pmm               - show PMM info\n");
+    console_printf(sh->con, "  alloc             - allocate and test one physical page\n");
     console_printf(sh->con, "  kmem              - show kernel heap stats\n");
     console_printf(sh->con, "  ktest             - basic kmalloc/kfree test\n");
     console_printf(sh->con, "  pci               - scan PCI bus and print devices\n");
@@ -668,6 +669,23 @@ static void shell_execute(SHELL *sh) {
 
     if (str_eq(sh->input, "pmm")) {
         shell_print_pmm(sh);
+        return;
+    }
+
+    if (str_eq(sh->input, "alloc")) {
+        void *p = pmm_alloc_page();
+    
+        if (!p) {
+            console_printf(sh->con, "alloc failed\n");
+            return;
+        }
+    
+        console_printf(sh->con, "allocated page: %p\n", p);
+    
+        uint64_t *x = (uint64_t*)p;
+        *x = 0xDEADBEEFCAFEBABEULL;
+    
+        console_printf(sh->con, "write ok, value=%p\n", (void*)(uintptr_t)(*x));
         return;
     }
 

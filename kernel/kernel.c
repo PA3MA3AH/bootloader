@@ -9,6 +9,7 @@
 #include "panic.h"
 #include "crashlog.h"
 #include "kheap.h"
+#include "vmm.h"
 
 #define KERNEL_PIT_HZ 100
 
@@ -198,6 +199,7 @@ static void kernel_init_memory(CONSOLE *con, BOOT_INFO *boot_info) {
                    (unsigned int)boot_info->scratch_size);
     
     pmm_init(con, boot_info);
+    vmm_init();
     pmm_dump(con);
 
     console_printf(con, "      PMM initialized successfully.\n\n");
