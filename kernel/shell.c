@@ -320,6 +320,7 @@ static void shell_print_help(SHELL *sh) {
     console_printf(sh->con, "  mem               - show boot memory info\n");
     console_printf(sh->con, "  pmm               - show PMM info\n");
     console_printf(sh->con, "  alloc             - allocate and test one physical page\n");
+    console_printf(sh->con, "  pf                - trigger a page fault for testing\n");
     console_printf(sh->con, "  kmem              - show kernel heap stats\n");
     console_printf(sh->con, "  ktest             - basic kmalloc/kfree test\n");
     console_printf(sh->con, "  pci               - scan PCI bus and print devices\n");
@@ -686,6 +687,15 @@ static void shell_execute(SHELL *sh) {
         *x = 0xDEADBEEFCAFEBABEULL;
     
         console_printf(sh->con, "write ok, value=%p\n", (void*)(uintptr_t)(*x));
+        return;
+    }
+
+    if (str_eq(sh->input, "pf")) {
+        console_printf(sh->con, "triggering page fault...\n");
+    
+        volatile uint64_t *bad = (uint64_t*)0xFFFFFFFFFFFFF000ULL;
+        *bad = 0x1234ULL;
+    
         return;
     }
 
