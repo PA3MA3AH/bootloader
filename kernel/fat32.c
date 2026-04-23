@@ -1,4 +1,6 @@
 #include "fat32.h"
+#include "kheap.h"
+#include "keyboard.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -7,7 +9,11 @@
 #define FAT32_DIRENT_SIZE              32U
 #define FAT32_MAX_PATH_COMPONENTS      16U
 #define FAT32_MAX_COMPONENT_LEN        16U
-#define FAT32_MAX_FILE_BYTES_TO_PRINT  (128U * 1024U)
+#define FAT32_MAX_FILE_BYTES_TO_PRINT  (8U * 1024U)
+#define FAT32_TEXT_PREVIEW_BYTES       (256U)
+#define FAT32_VIEW_PAGE_LINES          (20U)
+#define FAT32_VIEW_LINE_NUMBER_WIDTH   4
+#define FAT32_DUMP_DEFAULT_BYTES       (256U)
 
 typedef struct __attribute__((packed)) {
     uint8_t  jmp_boot[3];
@@ -439,6 +445,229 @@ static int fat_lookup_path(const FAT32_FS *fs, const char *path, FAT32_DIR_ENTRY
     return 1;
 }
 
+
+static int fat_is_printable_text_byte(uint8_t c) {
+    return (c >= 32 && c <= 126) || c == '\n' || c == '\r' || c == '\t';
+}
+
+static int fat_buffer_looks_text(const uint8_t *buf, uint32_t size) {
+    uint32_t sample;
+    uint32_t bad = 0;
+    uint32_t i;
+
+    if (!buf || size == 0) {
+        return 1;
+    }
+
+    sample = size;
+    if (sample > FAT32_TEXT_PREVIEW_BYTES) {
+        sample = FAT32_TEXT_PREVIEW_BYTES;
+    }
+
+    for (i = 0; i < sample; i++) {
+        if (!fat_is_printable_text_byte(buf[i])) {
+            bad++;
+        }
+    }
+
+    return bad <= (sample / 8U + 1U);
+}
+
+static void fat_print_attr_flags(CONSOLE *con, uint8_t attr) {
+    if (attr & FAT32_ATTR_DIRECTORY) console_write(con, "DIR ");
+    if (attr & FAT32_ATTR_READ_ONLY) console_write(con, "RO ");
+    if (attr & FAT32_ATTR_HIDDEN)    console_write(con, "HID ");
+    if (attr & FAT32_ATTR_SYSTEM)    console_write(con, "SYS ");
+    if (attr & FAT32_ATTR_ARCHIVE)   console_write(con, "ARC ");
+}
+
+static int fat_read_file_into_buffer(const FAT32_FS *fs,
+                                     const FAT32_DIR_ENTRY *file,
+                                     uint8_t **out_buf,
+                                     uint32_t *out_size) {
+    uint8_t *buf;
+    uint8_t sector[FAT32_SECTOR_SIZE];
+    uint32_t cluster;
+    uint32_t next_cluster;
+    uint32_t remaining;
+    uint32_t written = 0;
+    uint32_t s;
+
+    if (!fs || !file || !out_buf || !out_size || file->is_dir) {
+        return 0;
+    }
+
+    *out_buf = 0;
+    *out_size = 0;
+
+    if (file->size == 0) {
+        buf = (uint8_t*)kmalloc(1);
+        if (!buf) {
+            return 0;
+        }
+        buf[0] = 0;
+        *out_buf = buf;
+        *out_size = 0;
+        return 1;
+    }
+
+    buf = (uint8_t*)kmalloc(file->size + 1U);
+    if (!buf) {
+        return 0;
+    }
+
+    cluster = file->first_cluster;
+    remaining = file->size;
+
+    while (remaining > 0 && fat_is_valid_data_cluster(fs, cluster)) {
+        uint32_t base_lba = fat_cluster_to_lba(fs, cluster);
+
+        for (s = 0; s < fs->sectors_per_cluster && remaining > 0; s++) {
+            uint32_t to_copy = remaining;
+            if (to_copy > FAT32_SECTOR_SIZE) {
+                to_copy = FAT32_SECTOR_SIZE;
+            }
+
+            if (!fat_read_partition_sector(fs, base_lba + s, sector)) {
+                kfree(buf);
+                return 0;
+            }
+
+            fat_mem_copy(buf + written, sector, to_copy);
+            written += to_copy;
+            remaining -= to_copy;
+        }
+
+        if (remaining == 0) {
+            break;
+        }
+
+        if (!fat_read_fat_entry(fs, cluster, &next_cluster)) {
+            kfree(buf);
+            return 0;
+        }
+        if (fat_is_eoc(next_cluster) || next_cluster == cluster) {
+            break;
+        }
+        cluster = next_cluster;
+    }
+
+    if (written < file->size) {
+        kfree(buf);
+        return 0;
+    }
+
+    buf[file->size] = 0;
+    *out_buf = buf;
+    *out_size = file->size;
+    return 1;
+}
+
+static void fat_print_hex_dump(CONSOLE *con, const uint8_t *buf, uint32_t bytes) {
+    uint32_t i;
+    uint32_t j;
+
+    for (i = 0; i < bytes; i += 16U) {
+        console_printf(con, "%08x  ", (unsigned int)i);
+
+        for (j = 0; j < 16U; j++) {
+            if (i + j < bytes) {
+                uint8_t b = buf[i + j];
+                console_printf(con, "%c%c ",
+                               "0123456789ABCDEF"[b >> 4],
+                               "0123456789ABCDEF"[b & 0x0F]);
+            } else {
+                console_write(con, "   ");
+            }
+        }
+
+        console_write(con, " |");
+        for (j = 0; j < 16U && (i + j) < bytes; j++) {
+            uint8_t c = buf[i + j];
+            console_putchar(con, fat_is_printable_text_byte(c) && c != '\n' && c != '\r' ? (char)c : '.');
+        }
+        console_write(con, "|\n");
+    }
+}
+
+static void fat_wait_viewer_key(CONSOLE *con) {
+    console_write(con, "\n[Space/Enter: next page, Q/Esc: quit]");
+}
+
+static uint32_t fat_view_print_page(CONSOLE *con,
+                                    const uint8_t *buf,
+                                    uint32_t size,
+                                    uint32_t *offset_io,
+                                    uint32_t *line_no_io,
+                                    uint32_t max_lines) {
+    uint32_t lines_left = max_lines;
+    uint32_t text_width;
+    uint32_t offset = *offset_io;
+    uint32_t line_no = *line_no_io;
+
+    if (con->cols > (FAT32_VIEW_LINE_NUMBER_WIDTH + 3U)) {
+        text_width = con->cols - FAT32_VIEW_LINE_NUMBER_WIDTH - 3U;
+    } else {
+        text_width = 40U;
+    }
+
+    while (offset < size && lines_left > 0) {
+        uint32_t written = 0;
+
+        line_no++;
+        
+        {
+            uint32_t tmp = line_no;
+            uint32_t digits = 1;
+        
+            while (tmp >= 10) {
+                tmp /= 10;
+                digits++;
+            }
+        
+            while (digits < FAT32_VIEW_LINE_NUMBER_WIDTH) {
+                console_putchar(con, ' ');
+                digits++;
+            }
+        }
+        
+        console_printf(con, "%u | ", (unsigned int)line_no);
+
+        while (offset < size && written < text_width) {
+            uint8_t c = buf[offset++];
+
+            if (c == '\r') {
+                continue;
+            }
+
+            if (c == '\n') {
+                break;
+            }
+
+            console_putchar(con, fat_is_printable_text_byte(c) ? (char)c : '.');
+            written++;
+        }
+
+        console_putchar(con, '\n');
+
+        if (offset < size && written >= text_width) {
+            while (offset < size && buf[offset] != '\n') {
+                offset++;
+            }
+        }
+
+        if (offset < size && buf[offset] == '\n') {
+            offset++;
+        }
+
+        lines_left--;
+    }
+
+    *offset_io = offset;
+    *line_no_io = line_no;
+    return offset < size;
+}
+
 int fat32_mount(PARTITION_INFO *part, FAT32_FS *out_fs) {
     uint8_t sector[FAT32_SECTOR_SIZE];
     FAT32_BPB *bpb;
@@ -612,16 +841,14 @@ int fat32_list_directory(CONSOLE *con, PARTITION_INFO *part, const char *path) {
     return 1;
 }
 
+
 int fat32_cat_file(CONSOLE *con, PARTITION_INFO *part, const char *path) {
     FAT32_FS fs;
     FAT32_DIR_ENTRY file;
-    uint8_t sector[FAT32_SECTOR_SIZE];
-    uint32_t cluster;
-    uint32_t next_cluster;
-    uint32_t base_lba;
-    uint32_t s;
-    uint32_t remaining;
-    uint32_t printed = 0;
+    uint8_t *buf;
+    uint32_t size;
+    uint32_t i;
+    uint32_t print_bytes;
 
     if (!con || !part || !path) {
         return 0;
@@ -631,76 +858,192 @@ int fat32_cat_file(CONSOLE *con, PARTITION_INFO *part, const char *path) {
         return 0;
     }
 
-    if (!fat_lookup_path(&fs, path, &file)) {
+    if (!fat_lookup_path(&fs, path, &file) || file.is_dir) {
         return 0;
     }
 
-    if (file.is_dir) {
+    if (!fat_read_file_into_buffer(&fs, &file, &buf, &size)) {
         return 0;
     }
 
     console_printf(con, "File %s:%s (%u bytes)\n",
                    part->name,
                    path,
-                   (unsigned int)file.size);
+                   (unsigned int)size);
 
-    if (file.size == 0) {
+    if (size == 0) {
+        kfree(buf);
         return 1;
     }
 
-    cluster = file.first_cluster;
-    remaining = file.size;
+    if (!fat_buffer_looks_text(buf, size)) {
+        console_printf(con,
+                       "[fatcat] binary-looking file; use fatdump %s %s\n",
+                       part->name,
+                       path);
+        kfree(buf);
+        return 1;
+    }
 
-    while (remaining > 0 && fat_is_valid_data_cluster(&fs, cluster)) {
-        base_lba = fat_cluster_to_lba(&fs, cluster);
+    print_bytes = size;
+    if (print_bytes > FAT32_MAX_FILE_BYTES_TO_PRINT) {
+        print_bytes = FAT32_MAX_FILE_BYTES_TO_PRINT;
+    }
 
-        for (s = 0; s < fs.sectors_per_cluster && remaining > 0; s++) {
-            uint32_t i;
-            uint32_t to_print;
+    for (i = 0; i < print_bytes; i++) {
+        uint8_t c = buf[i];
+        console_putchar(con, fat_is_printable_text_byte(c) ? (char)c : '.');
+    }
 
-            if (!fat_read_partition_sector(&fs, base_lba + s, sector)) {
-                return 0;
-            }
+    if (print_bytes < size) {
+        console_printf(con,
+                       "\n[fatcat] truncated at %u bytes; use fatview %s %s\n",
+                       (unsigned int)print_bytes,
+                       part->name,
+                       path);
+    } else if (print_bytes > 0 && buf[print_bytes - 1] != '\n') {
+        console_putchar(con, '\n');
+    }
 
-            to_print = remaining;
-            if (to_print > FAT32_SECTOR_SIZE) {
-                to_print = FAT32_SECTOR_SIZE;
-            }
+    kfree(buf);
+    return 1;
+}
 
-            for (i = 0; i < to_print; i++) {
-                uint8_t c = sector[i];
-                console_putchar(con, (c >= 32 && c <= 126) || c == '\n' || c == '\r' || c == '\t' ? (char)c : '.');
-            }
+int fat32_stat_path(CONSOLE *con, PARTITION_INFO *part, const char *path) {
+    FAT32_FS fs;
+    FAT32_DIR_ENTRY entry;
 
-            remaining -= to_print;
-            printed += to_print;
+    if (!con || !part || !path) {
+        return 0;
+    }
 
-            if (printed >= FAT32_MAX_FILE_BYTES_TO_PRINT && remaining > 0) {
-                console_printf(con, "\n[fatcat] output truncated at %u bytes\n",
-                               (unsigned int)printed);
+    if (!fat32_mount(part, &fs)) {
+        return 0;
+    }
+
+    if (!fat_lookup_path(&fs, path, &entry)) {
+        return 0;
+    }
+
+    console_printf(con, "Path:         %s:%s\n", part->name, path);
+    console_printf(con, "Type:         %s\n", entry.is_dir ? "directory" : "file");
+    console_printf(con, "Name:         %s\n", entry.name);
+    console_printf(con, "First cluster:%u\n", (unsigned int)entry.first_cluster);
+    console_printf(con, "Size:         %u bytes\n", (unsigned int)entry.size);
+    console_printf(con, "Attrs:        0x%x ", (unsigned int)entry.attr);
+    fat_print_attr_flags(con, entry.attr);
+    console_putchar(con, '\n');
+    return 1;
+}
+
+int fat32_view_file(CONSOLE *con, PARTITION_INFO *part, const char *path, uint32_t page_lines) {
+    FAT32_FS fs;
+    FAT32_DIR_ENTRY file;
+    uint8_t *buf;
+    uint32_t size;
+    uint32_t offset = 0;
+    uint32_t line_no = 0;
+
+    if (!con || !part || !path) {
+        return 0;
+    }
+
+    if (!fat32_mount(part, &fs)) {
+        return 0;
+    }
+
+    if (!fat_lookup_path(&fs, path, &file) || file.is_dir) {
+        return 0;
+    }
+
+    if (!fat_read_file_into_buffer(&fs, &file, &buf, &size)) {
+        return 0;
+    }
+
+    console_printf(con,
+                   "View %s:%s (%u bytes)%s\n",
+                   part->name,
+                   path,
+                   (unsigned int)size,
+                   fat_buffer_looks_text(buf, size) ? "" : " [binary shown as .]");
+
+    if (page_lines == 0) {
+        while (offset < size) {
+            fat_view_print_page(con, buf, size, &offset, &line_no, 1024U);
+        }
+        kfree(buf);
+        return 1;
+    }
+
+    while (offset < size) {
+        fat_view_print_page(con, buf, size, &offset, &line_no, page_lines);
+    
+        if (offset >= size) {
+            break;
+        }
+    
+        fat_wait_viewer_key(con);
+        for (;;) {
+            char ch = keyboard_getchar();
+    
+            if (ch == 'q' || ch == 'Q' || (unsigned char)ch == 27) {
+                console_putchar(con, '\n');
+                kfree(buf);
                 return 1;
             }
+    
+            if (ch == ' ' || ch == '\n' || ch == '\r') {
+                console_putchar(con, '\n');
+                break;
+            }
         }
+    }
+    
+    kfree(buf);
+    return 1;
+}
 
-        if (remaining == 0) {
-            break;
-        }
+int fat32_dump_file(CONSOLE *con, PARTITION_INFO *part, const char *path, uint32_t max_bytes) {
+    FAT32_FS fs;
+    FAT32_DIR_ENTRY file;
+    uint8_t *buf;
+    uint32_t size;
 
-        if (!fat_read_fat_entry(&fs, cluster, &next_cluster)) {
-            return 0;
-        }
-        if (fat_is_eoc(next_cluster)) {
-            break;
-        }
-        if (next_cluster == cluster) {
-            return 0;
-        }
-        cluster = next_cluster;
+    if (!con || !part || !path) {
+        return 0;
     }
 
-    if (printed > 0) {
-        console_printf(con, "\n");
+    if (!fat32_mount(part, &fs)) {
+        return 0;
     }
 
-    return remaining == 0;
+    if (!fat_lookup_path(&fs, path, &file) || file.is_dir) {
+        return 0;
+    }
+
+    if (!fat_read_file_into_buffer(&fs, &file, &buf, &size)) {
+        return 0;
+    }
+
+    if (max_bytes == 0 || max_bytes > FAT32_DUMP_DEFAULT_BYTES) {
+        max_bytes = FAT32_DUMP_DEFAULT_BYTES;
+    }
+
+    if (size < max_bytes) {
+        max_bytes = size;
+    }
+
+    console_printf(con, "Dump %s:%s (%u/%u bytes)\n",
+                   part->name,
+                   path,
+                   (unsigned int)max_bytes,
+                   (unsigned int)size);
+    fat_print_hex_dump(con, buf, max_bytes);
+
+    if (max_bytes < size) {
+        console_printf(con, "[fatdump] truncated at %u bytes\n", (unsigned int)max_bytes);
+    }
+
+    kfree(buf);
+    return 1;
 }

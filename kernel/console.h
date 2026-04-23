@@ -30,6 +30,7 @@ void console_set_colors(CONSOLE *con, uint32_t fg, uint32_t bg);
 
 void console_putchar(CONSOLE *con, char c);
 void console_write(CONSOLE *con, const char *s);
+void console_write_len(CONSOLE *con, const char *s, uint32_t len);
 void console_backspace(CONSOLE *con);
 
 void console_write_hex(CONSOLE *con, uint64_t value);

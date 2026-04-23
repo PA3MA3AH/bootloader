@@ -23,28 +23,43 @@ static void clear_cell(CONSOLE *con, uint32_t cx, uint32_t cy) {
 }
 
 static void scroll_if_needed(CONSOLE *con) {
+    uint32_t line_pixels;
+    uint32_t pitch;
+    uint32_t width_pixels;
+    uint32_t height_pixels;
+    uint32_t x0;
+    uint32_t y0;
+    uint32_t copy_rows;
+    uint32_t clear_rows;
+    uint32_t y;
+
     if (con->cursor_y < con->rows) {
         return;
     }
 
-    uint32_t line_pixels = con->cell_h;
-    uint32_t pitch = con->fb.pitch;
-    uint32_t width_pixels = con->cols * con->cell_w;
-    uint32_t height_pixels = con->rows * con->cell_h;
+    line_pixels = con->cell_h;
+    pitch = con->fb.pitch;
+    width_pixels = con->cols * con->cell_w;
+    height_pixels = con->rows * con->cell_h;
+    x0 = con->origin_x;
+    y0 = con->origin_y;
+    copy_rows = height_pixels - line_pixels;
+    clear_rows = line_pixels;
 
-    uint32_t x0 = con->origin_x;
-    uint32_t y0 = con->origin_y;
-
-    for (uint32_t y = line_pixels; y < height_pixels; y++) {
-        for (uint32_t x = 0; x < width_pixels; x++) {
-            con->fb.base[(y0 + y - line_pixels) * pitch + (x0 + x)] =
-                con->fb.base[(y0 + y) * pitch + (x0 + x)];
+    for (y = 0; y < copy_rows; y++) {
+        uint32_t *dst = &con->fb.base[(y0 + y) * pitch + x0];
+        uint32_t *src = &con->fb.base[(y0 + y + line_pixels) * pitch + x0];
+        uint32_t x;
+        for (x = 0; x < width_pixels; x++) {
+            dst[x] = src[x];
         }
     }
 
-    for (uint32_t y = height_pixels - line_pixels; y < height_pixels; y++) {
-        for (uint32_t x = 0; x < width_pixels; x++) {
-            con->fb.base[(y0 + y) * pitch + (x0 + x)] = con->bg_color;
+    for (y = 0; y < clear_rows; y++) {
+        uint32_t *dst = &con->fb.base[(y0 + copy_rows + y) * pitch + x0];
+        uint32_t x;
+        for (x = 0; x < width_pixels; x++) {
+            dst[x] = con->bg_color;
         }
     }
 
@@ -150,6 +165,13 @@ void console_putchar(CONSOLE *con, char c) {
 void console_write(CONSOLE *con, const char *s) {
     while (*s) {
         console_putchar(con, *s++);
+    }
+}
+
+void console_write_len(CONSOLE *con, const char *s, uint32_t len) {
+    uint32_t i;
+    for (i = 0; i < len; i++) {
+        console_putchar(con, s[i]);
     }
 }
 

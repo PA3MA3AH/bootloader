@@ -342,7 +342,10 @@ static void shell_print_help(SHELL *sh) {
     console_printf(sh->con, "  partscan          - rescan partitions on all disks\n");
     console_printf(sh->con, "  partinfo <part>   - show partition info by index or name\n");
     console_printf(sh->con, "  fatls <part> [p]  - list FAT32 directory (8.3 names)\n");
-    console_printf(sh->con, "  fatcat <part> <p> - print FAT32 file contents (read-only)\n");
+    console_printf(sh->con, "  fatcat <part> <p> - quick text preview for small files\n");
+    console_printf(sh->con, "  fatview <part> <p>- paged file viewer with line numbers\n");
+    console_printf(sh->con, "  fatdump <part> <p>- hex dump first bytes of a file\n");
+    console_printf(sh->con, "  fatstat <part> <p>- show FAT32 entry info\n");
     console_printf(sh->con, "  e1000             - probe and init Intel e1000/e1000e device\n");
     console_printf(sh->con, "  e1000dump         - print extended e1000 debug registers\n");
     console_printf(sh->con, "  e1000rings        - initialize e1000 RX/TX rings\n");
@@ -1339,6 +1342,96 @@ static void shell_run_fatcat(SHELL *sh, const char *args) {
     }
 }
 
+static void shell_run_fatview(SHELL *sh, const char *args) {
+    PARTITION_INFO *part;
+    char path[128];
+    uint32_t page_lines = 0;
+
+    if (!args || !*args) {
+        console_printf(sh->con, "Usage: fatview [-N] <part> <path>\n");
+        return;
+    }
+
+    while (*args == ' ') {
+        args++;
+    }
+
+    if (*args == '-') {
+        uint32_t n = 0;
+        args++;
+
+        if (*args < '0' || *args > '9') {
+            console_printf(sh->con, "Usage: fatview [-N] <part> <path>\n");
+            return;
+        }
+
+        while (*args >= '0' && *args <= '9') {
+            n = n * 10u + (uint32_t)(*args - '0');
+            args++;
+        }
+
+        while (*args == ' ') {
+            args++;
+        }
+
+        if (n < 10) {
+            n = 10;
+        }
+        if (n > 30) {
+            n = 30;
+        }
+
+        page_lines = n;
+    }
+
+    if (!shell_parse_part_and_required_path(sh, args, &part, path, sizeof(path))) {
+        console_printf(sh->con, "Usage: fatview [-N] <part> <path>\n");
+        return;
+    }
+
+    if (!fat32_view_file(sh->con, part, path, page_lines)) {
+        console_printf(sh->con, "fatview: cannot view '%s' on %s\n", path, part->name);
+    }
+}
+
+static void shell_run_fatdump(SHELL *sh, const char *args) {
+    PARTITION_INFO *part;
+    char path[128];
+
+    if (!args || !*args) {
+        console_printf(sh->con, "Usage: fatdump <part> <path>\n");
+        return;
+    }
+
+    if (!shell_parse_part_and_required_path(sh, args, &part, path, sizeof(path))) {
+        console_printf(sh->con, "Usage: fatdump <part> <path>\n");
+        return;
+    }
+
+    if (!fat32_dump_file(sh->con, part, path, 256U)) {
+        console_printf(sh->con, "fatdump: cannot dump '%s' on %s\n", path, part->name);
+    }
+}
+
+static void shell_run_fatstat(SHELL *sh, const char *args) {
+    PARTITION_INFO *part;
+    char path[128];
+
+    if (!args || !*args) {
+        console_printf(sh->con, "Usage: fatstat <part> <path>\n");
+        return;
+    }
+
+    if (!shell_parse_part_and_required_path(sh, args, &part, path, sizeof(path))) {
+        console_printf(sh->con, "Usage: fatstat <part> <path>\n");
+        return;
+    }
+
+    if (!fat32_stat_path(sh->con, part, path)) {
+        console_printf(sh->con, "fatstat: cannot stat '%s' on %s\n", path, part->name);
+    }
+}
+
 static void shell_execute(SHELL *sh) {
     if (sh->length == 0) {
         return;
@@ -1420,6 +1513,21 @@ static void shell_execute(SHELL *sh) {
 
     if (str_starts_with(sh->input, "fatls ")) {
         shell_run_fatls(sh, sh->input + 6);
+        return;
+    }
+
+    if (str_starts_with(sh->input, "fatstat ")) {
+        shell_run_fatstat(sh, sh->input + 8);
+        return;
+    }
+    
+    if (str_starts_with(sh->input, "fatview ")) {
+        shell_run_fatview(sh, sh->input + 8);
+        return;
+    }
+    
+    if (str_starts_with(sh->input, "fatdump ")) {
+        shell_run_fatdump(sh, sh->input + 8);
         return;
     }
 

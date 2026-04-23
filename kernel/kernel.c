@@ -13,6 +13,7 @@
 #include "ahci.h"
 #include "block.h"
 #include "partition.h"
+#include "io.h"
 
 #define KERNEL_PIT_HZ 100
 
@@ -301,6 +302,54 @@ static void kernel_prepare_timer(CONSOLE *con) {
                    (unsigned int)KERNEL_PIT_HZ);
 }
 
+
+#define KERNEL_DEBUG_SHELL_WAIT_SPINS  80000000U
+#define KERNEL_F5_SCANCODE_SET1        0x3FU
+
+static int kernel_poll_debug_shell_hotkey(void) {
+    uint32_t spins = KERNEL_DEBUG_SHELL_WAIT_SPINS;
+
+    while (spins-- > 0) {
+        if (inb(0x64) & 0x01) {
+            uint8_t sc = inb(0x60);
+            if (sc == KERNEL_F5_SCANCODE_SET1) {
+                return 1;
+            }
+        }
+    }
+
+    return 0;
+}
+
+static int kernel_should_enter_debug_shell(CONSOLE *con) {
+    console_printf(con, "[boot] Press F5 for debug shell...\n");
+    if (kernel_poll_debug_shell_hotkey()) {
+        console_printf(con, "[boot] F5 detected. Entering debug shell.\n\n");
+        return 1;
+    }
+
+    console_printf(con, "[boot] No F5 detected. Continuing to default OS stage.\n\n");
+    return 0;
+}
+
+static __attribute__((noreturn))
+void kernel_run_default_stage(CONSOLE *con) {
+    panic_set_stage("default runtime");
+    crashlog_mark_stable();
+
+    console_clear(con);
+    console_printf(con, "Default OS stage placeholder.\n");
+    console_printf(con, "Interactive debug shell is disabled by default.\n");
+    console_printf(con, "Press F5 during boot to enter the shell.\n");
+    console_printf(con, "Replace kernel_run_default_stage() with your OS entry later.\n");
+
+    interrupts_enable();
+
+    for (;;) {
+        __asm__ volatile ("hlt");
+    }
+}
+
 static __attribute__((noreturn))
 void kernel_run_shell(SHELL *sh) {
     panic_set_stage("shell runtime");
@@ -352,5 +401,9 @@ void kernel_main(BOOT_INFO *boot_info) {
     kernel_init_shell(&con, boot_info, &sh);
     kernel_prepare_timer(&con);
 
-    kernel_run_shell(&sh);
+    if (kernel_should_enter_debug_shell(&con)) {
+        kernel_run_shell(&sh);
+    }
+
+    kernel_run_default_stage(&con);
 }
