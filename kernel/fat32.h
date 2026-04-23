@@ -58,5 +58,7 @@ int fat32_view_file(CONSOLE *con, PARTITION_INFO *part, const char *path, uint32
 int fat32_dump_file(CONSOLE *con, PARTITION_INFO *part, const char *path, uint32_t max_bytes);
 int fat32_write_file(CONSOLE *con, PARTITION_INFO *part,
                      const char *path, const void *buf, uint32_t size);
+int fat32_rename(CONSOLE *con, PARTITION_INFO *part,
+                 const char *old_path, const char *new_path);
 
 #endif

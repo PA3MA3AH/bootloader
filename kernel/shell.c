@@ -344,6 +344,7 @@ static void shell_print_help(SHELL *sh) {
     console_printf(sh->con, "  fatls <part> [p]  - list FAT32 directory (8.3 names)\n");
     console_printf(sh->con, "  fatcat <part> <p> - quick text preview for small files\n");
     console_printf(sh->con, "  fatwrite <part> <p> <text> - overwrite existing file\n");
+    console_printf(sh->con, "  fatrename <part> <old> <new> - rename within same dir\n");
     console_printf(sh->con, "  fatview <part> <p>- paged file viewer with line numbers\n");
     console_printf(sh->con, "  fatdump <part> <p>- hex dump first bytes of a file\n");
     console_printf(sh->con, "  fatstat <part> <p>- show FAT32 entry info\n");
@@ -1409,6 +1410,48 @@ static void shell_run_fatwrite(SHELL *sh, const char *args) {
     }
 }
 
+static void shell_run_fatrename(SHELL *sh, const char *args) {
+    PARTITION_INFO *part;
+    char part_name[PARTITION_NAME_MAX];
+    char old_path[128];
+    char new_path[128];
+    uint32_t i = 0;
+    uint32_t j;
+
+    if (!args || !*args) {
+        console_printf(sh->con, "Usage: fatrename <part> <old> <new>\n");
+        return;
+    }
+
+    while (args[i] == ' ') i++;
+    j = 0;
+    while (args[i] && args[i] != ' ' && j + 1 < sizeof(part_name)) part_name[j++] = args[i++];
+    part_name[j] = '\0';
+    if (j == 0) { console_printf(sh->con, "Usage: fatrename <part> <old> <new>\n"); return; }
+
+    while (args[i] == ' ') i++;
+    j = 0;
+    while (args[i] && args[i] != ' ' && j + 1 < sizeof(old_path)) old_path[j++] = args[i++];
+    old_path[j] = '\0';
+    if (j == 0) { console_printf(sh->con, "Usage: fatrename <part> <old> <new>\n"); return; }
+
+    while (args[i] == ' ') i++;
+    j = 0;
+    while (args[i] && args[i] != ' ' && j + 1 < sizeof(new_path)) new_path[j++] = args[i++];
+    new_path[j] = '\0';
+    if (j == 0) { console_printf(sh->con, "Usage: fatrename <part> <old> <new>\n"); return; }
+
+    part = shell_find_partition(sh, part_name);
+    if (!part) {
+        console_printf(sh->con, "fatrename: unknown partition '%s'\n", part_name);
+        return;
+    }
+
+    if (!fat32_rename(sh->con, part, old_path, new_path)) {
+        console_printf(sh->con, "fatrename: failed\n");
+    }
+}
+
 static void shell_run_fatview(SHELL *sh, const char *args) {
     PARTITION_INFO *part;
     char path[128];
@@ -1605,6 +1648,11 @@ static void shell_execute(SHELL *sh) {
 
     if (str_starts_with(sh->input, "fatwrite ")) {
         shell_run_fatwrite(sh, sh->input + 9);
+        return;
+    }
+
+    if (str_starts_with(sh->input, "fatrename ")) {
+        shell_run_fatrename(sh, sh->input + 10);
         return;
     }
 

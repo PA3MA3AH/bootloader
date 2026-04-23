@@ -1439,3 +1439,82 @@ int fat32_write_file(CONSOLE *con, PARTITION_INFO *part,
         size, path, first_cluster, clusters_needed);
     return 1;
 }
+
+/* ============================================================
+ * Stage 3: rename within the same directory.
+ * Cross-directory move is deferred until Stage 4 (delete+create).
+ * ============================================================ */
+int fat32_rename(CONSOLE *con, PARTITION_INFO *part,
+                 const char *old_path, const char *new_path)
+{
+    FAT32_FS fs;
+    uint32_t parent_old, parent_new;
+    char     leaf_old[FAT32_MAX_COMPONENT_LEN];
+    char     leaf_new[FAT32_MAX_COMPONENT_LEN];
+    uint8_t  new_short[11];
+    uint64_t dirent_lba;
+    uint32_t dirent_offset;
+    uint64_t dummy_lba;
+    uint32_t dummy_offset;
+    uint8_t  sector[FAT32_SECTOR_SIZE];
+    FAT32_RAW_DIRENT *raw;
+
+    if (!part || !old_path || !new_path) {
+        if (con) console_printf(con, "fat32_rename: bad args\n");
+        return 0;
+    }
+    if (!fat32_mount(part, &fs)) {
+        if (con) console_printf(con, "fat32_rename: mount failed\n");
+        return 0;
+    }
+
+    if (!fat_resolve_parent_dir(&fs, old_path, &parent_old, leaf_old, sizeof(leaf_old))) {
+        if (con) console_printf(con, "fat32_rename: parent of '%s' not found\n", old_path);
+        return 0;
+    }
+    if (!fat_resolve_parent_dir(&fs, new_path, &parent_new, leaf_new, sizeof(leaf_new))) {
+        if (con) console_printf(con, "fat32_rename: parent of '%s' not found\n", new_path);
+        return 0;
+    }
+
+    if (parent_old != parent_new) {
+        if (con) console_printf(con,
+            "fat32_rename: cross-directory rename not supported (Stage 3 limit)\n");
+        return 0;
+    }
+
+    /* Validate that the new short name is representable. */
+    if (!fat_component_to_short_name(leaf_new, new_short)) {
+        if (con) console_printf(con,
+            "fat32_rename: '%s' is not a valid 8.3 name\n", leaf_new);
+        return 0;
+    }
+
+    /* Locate source dirent. */
+    if (!fat_locate_dirent_in_directory(&fs, parent_old, leaf_old,
+                                        &dirent_lba, &dirent_offset)) {
+        if (con) console_printf(con, "fat32_rename: '%s' not found\n", old_path);
+        return 0;
+    }
+
+    /* Refuse if destination already exists. */
+    if (fat_locate_dirent_in_directory(&fs, parent_new, leaf_new,
+                                       &dummy_lba, &dummy_offset)) {
+        if (con) console_printf(con,
+            "fat32_rename: destination '%s' already exists\n", new_path);
+        return 0;
+    }
+
+    /* Patch the 11-byte short-name field in place. */
+    if (!fat_read_partition_sector(&fs, dirent_lba, sector)) return 0;
+    raw = (FAT32_RAW_DIRENT*)&sector[dirent_offset];
+    fat_mem_copy(raw->name, new_short, 11);
+    if (!fat_write_partition_sector(&fs, dirent_lba, sector)) return 0;
+
+    if (part->parent && !block_flush(part->parent)) {
+        if (con) console_printf(con, "fat32_rename: warning: flush failed\n");
+    }
+
+    if (con) console_printf(con, "renamed '%s' -> '%s'\n", old_path, new_path);
+    return 1;
+}
