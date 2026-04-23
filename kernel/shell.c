@@ -10,6 +10,7 @@
 #include "net.h"
 #include "ahci.h"
 #include "block.h"
+#include "partition.h"
 
 #define SHELL_PIT_HZ 100
 #define SHELL_HISTORY_MAX 16
@@ -336,6 +337,9 @@ static void shell_print_help(SHELL *sh) {
     console_printf(sh->con, "  blk               - list generic block devices\n");
     console_printf(sh->con, "  blkid <dev>       - show block device info by index or name\n");
     console_printf(sh->con, "  blkread d lba n   - read 1..8 sectors via block layer\n");
+    console_printf(sh->con, "  part              - list detected partitions\n");
+    console_printf(sh->con, "  partscan          - rescan partitions on all disks\n");
+    console_printf(sh->con, "  partinfo <part>   - show partition info by index or name\n");
     console_printf(sh->con, "  e1000             - probe and init Intel e1000/e1000e device\n");
     console_printf(sh->con, "  e1000dump         - print extended e1000 debug registers\n");
     console_printf(sh->con, "  e1000rings        - initialize e1000 RX/TX rings\n");
@@ -1164,6 +1168,53 @@ static void shell_run_blkread(SHELL *sh, const char *args) {
     shell_hex_dump(sh, buf, count * AHCI_SECTOR_SIZE);
 }
 
+static PARTITION_INFO *shell_find_partition(SHELL *sh, const char *arg) {
+    uint32_t index = 0;
+    char name[PARTITION_NAME_MAX];
+    int mode;
+
+    mode = parse_u32_or_name_arg(arg, &index, name, sizeof(name));
+    if (mode == 0) {
+        console_printf(sh->con, "Usage: partinfo <part>\n");
+        return 0;
+    }
+
+    if (mode == 1) {
+        PARTITION_INFO *part = partition_get(index);
+        if (!part) {
+            console_printf(sh->con, "partition: index %u not found\n", (unsigned int)index);
+        }
+        return part;
+    }
+
+    {
+        PARTITION_INFO *part = partition_find_by_name(name);
+        if (!part) {
+            console_printf(sh->con, "partition: '%s' not found\n", name);
+        }
+        return part;
+    }
+}
+
+static void shell_run_part(SHELL *sh) {
+    partition_print_all(sh->con);
+}
+
+static void shell_run_partscan(SHELL *sh) {
+    uint32_t count = partition_scan_all();
+    console_printf(sh->con, "partscan: found %u partition(s)\n", (unsigned int)count);
+    partition_print_all(sh->con);
+}
+
+static void shell_run_partinfo(SHELL *sh, const char *args) {
+    PARTITION_INFO *part = shell_find_partition(sh, args);
+    if (!part) {
+        return;
+    }
+
+    partition_print_info(sh->con, part);
+}
+
 typedef struct __attribute__((packed)) {
     uint8_t  jmp_boot[3];
     uint8_t  oem_name[8];
@@ -1419,6 +1470,21 @@ static void shell_execute(SHELL *sh) {
 
     if (str_starts_with(sh->input, "blkread ")) {
         shell_run_blkread(sh, sh->input + 8);
+        return;
+    }
+
+    if (str_eq(sh->input, "part")) {
+        shell_run_part(sh);
+        return;
+    }
+
+    if (str_eq(sh->input, "partscan")) {
+        shell_run_partscan(sh);
+        return;
+    }
+
+    if (str_starts_with(sh->input, "partinfo ")) {
+        shell_run_partinfo(sh, sh->input + 9);
         return;
     }
 

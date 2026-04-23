@@ -12,6 +12,7 @@
 #include "vmm.h"
 #include "ahci.h"
 #include "block.h"
+#include "partition.h"
 
 #define KERNEL_PIT_HZ 100
 
@@ -255,6 +256,14 @@ static void kernel_init_storage(CONSOLE *con) {
     }
 
     block_print_devices(con);
+
+    partition_init();
+    if (partition_scan_all() == 0) {
+        console_printf(con, "      No partitions detected.\n\n");
+        return;
+    }
+
+    partition_print_all(con);
     console_printf(con, "\n");
 }
 

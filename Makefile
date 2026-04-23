@@ -42,7 +42,8 @@ KERNEL_OBJS := \
 		kernel/exceptions.o \
 		kernel/isr_stubs.o \
 		kernel/ahci.o \
-		kernel/block.o
+		kernel/block.o \
+		kernel/partition.o
 
 .PHONY: all build bootloader kernel run clean rebuild tap-up
 
@@ -138,6 +139,9 @@ kernel/ahci.o: kernel/ahci.c kernel/ahci.h | build
 
 kernel/block.o: kernel/block.c kernel/block.h | build
 		$(CC) $(KERNEL_CFLAGS) -c kernel/block.c -o $@
+
+kernel/partition.o: kernel/partition.c kernel/partition.h kernel/block.h | build
+		$(CC) $(KERNEL_CFLAGS) -c kernel/partition.c -o $@
 
 image/EFI/BOOT/KERNEL.ELF: $(KERNEL_OBJS)
 		$(LD_KERNEL) $(KERNEL_LDFLAGS) $(KERNEL_OBJS)
