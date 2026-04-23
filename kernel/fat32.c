@@ -1261,3 +1261,181 @@ int fat32_dump_file(CONSOLE *con, PARTITION_INFO *part, const char *path, uint32
     kfree(buf);
     return 1;
 }
+
+/* ============================================================
+ * Stage 2: overwrite an existing file. Stage 4 will add create.
+ * ============================================================ */
+
+/* Resolve the parent directory cluster of `path` and copy out the
+ * leaf component. "/HELLO.TXT" -> parent=root, leaf="HELLO.TXT".
+ * "/dir/sub/f.bin" -> parent=cluster of sub, leaf="f.bin". */
+static int fat_resolve_parent_dir(const FAT32_FS *fs,
+                                  const char *path,
+                                  uint32_t *out_parent_cluster,
+                                  char *out_leaf,
+                                  uint32_t leaf_size)
+{
+    char components[FAT32_MAX_PATH_COMPONENTS][FAT32_MAX_COMPONENT_LEN];
+    uint32_t component_count = 0;
+    uint32_t i;
+    uint32_t cluster;
+    FAT32_DIR_ENTRY entry;
+    uint32_t leaf_idx;
+    uint32_t pos;
+
+    if (!fs || !path || !out_parent_cluster || !out_leaf || leaf_size == 0) {
+        return 0;
+    }
+    if (!fat_parse_path_components(path, components, &component_count)) {
+        return 0;
+    }
+    if (component_count == 0) {
+        return 0; /* no leaf -> path is root itself */
+    }
+
+    cluster  = fs->root_cluster;
+    leaf_idx = component_count - 1U;
+
+    for (i = 0; i < leaf_idx; i++) {
+        if (!fat_find_entry_in_directory(fs, cluster, components[i], &entry)) {
+            return 0;
+        }
+        if (!entry.is_dir) {
+            return 0;
+        }
+        cluster = entry.first_cluster ? entry.first_cluster : fs->root_cluster;
+    }
+
+    *out_parent_cluster = cluster;
+
+    pos = 0;
+    while (components[leaf_idx][pos] && pos + 1 < leaf_size) {
+        out_leaf[pos] = components[leaf_idx][pos];
+        pos++;
+    }
+    out_leaf[pos] = '\0';
+    return 1;
+}
+
+int fat32_write_file(CONSOLE *con, PARTITION_INFO *part,
+                     const char *path, const void *buf, uint32_t size)
+{
+    FAT32_FS fs;
+    uint32_t parent_cluster;
+    char     leaf[FAT32_MAX_COMPONENT_LEN];
+    uint64_t dirent_lba;
+    uint32_t dirent_offset;
+    uint8_t  sector[FAT32_SECTOR_SIZE];
+    FAT32_RAW_DIRENT *raw;
+    uint32_t old_first_cluster;
+    uint32_t cluster_bytes;
+    uint32_t clusters_needed;
+    uint32_t first_cluster = 0;
+    uint32_t prev_cluster  = 0;
+    uint32_t cur_cluster;
+    uint32_t i;
+    uint32_t remaining;
+    uint8_t  cluster_buf[FAT32_SECTOR_SIZE * 8U]; /* up to 8 sectors/cluster (4 KiB) */
+
+    if (!part || !path || (!buf && size > 0)) {
+        if (con) console_printf(con, "fat32_write_file: bad args\n");
+        return 0;
+    }
+    if (!fat32_mount(part, &fs)) {
+        if (con) console_printf(con, "fat32_write_file: mount failed\n");
+        return 0;
+    }
+
+    cluster_bytes = (uint32_t)fs.bytes_per_sector * (uint32_t)fs.sectors_per_cluster;
+    if (cluster_bytes > sizeof(cluster_buf)) {
+        if (con) console_printf(con,
+            "fat32_write_file: cluster size %u exceeds buffer\n", cluster_bytes);
+        return 0;
+    }
+
+    /* 1. find parent dir + dirent on disk */
+    if (!fat_resolve_parent_dir(&fs, path, &parent_cluster, leaf, sizeof(leaf))) {
+        if (con) console_printf(con, "fat32_write_file: parent of '%s' not found\n", path);
+        return 0;
+    }
+    if (!fat_locate_dirent_in_directory(&fs, parent_cluster, leaf,
+                                        &dirent_lba, &dirent_offset)) {
+        if (con) console_printf(con,
+            "fat32_write_file: '%s' not found (Stage 2: overwrite only)\n", path);
+        return 0;
+    }
+
+    /* 2. read dirent, snapshot existing chain head */
+    if (!fat_read_partition_sector(&fs, dirent_lba, sector)) return 0;
+    raw = (FAT32_RAW_DIRENT*)&sector[dirent_offset];
+
+    if (raw->attr & FAT32_ATTR_DIRECTORY) {
+        if (con) console_printf(con, "fat32_write_file: '%s' is a directory\n", path);
+        return 0;
+    }
+    if (raw->attr & FAT32_ATTR_READ_ONLY) {
+        if (con) console_printf(con, "fat32_write_file: '%s' is read-only\n", path);
+        return 0;
+    }
+
+    old_first_cluster = ((uint32_t)raw->first_cluster_hi << 16) |
+                        (uint32_t)raw->first_cluster_lo;
+
+    /* 3. release old chain (no-op if file was empty) */
+    if (old_first_cluster >= 2U) {
+        if (!fat_free_cluster_chain(&fs, old_first_cluster)) {
+            if (con) console_printf(con, "fat32_write_file: free chain failed\n");
+            return 0;
+        }
+    }
+
+    /* 4. allocate new chain, link clusters, write data */
+    clusters_needed = (size + cluster_bytes - 1U) / cluster_bytes;
+    remaining = size;
+
+    for (i = 0; i < clusters_needed; i++) {
+        if (!fat_alloc_cluster(&fs, &cur_cluster)) {
+            if (con) console_printf(con, "fat32_write_file: out of clusters\n");
+            return 0;
+        }
+        if (i == 0) {
+            first_cluster = cur_cluster;
+        } else {
+            if (!fat_write_fat_entry(&fs, prev_cluster, cur_cluster)) {
+                if (con) console_printf(con, "fat32_write_file: link FAT failed\n");
+                return 0;
+            }
+        }
+
+        fat_mem_zero(cluster_buf, cluster_bytes);
+        if (remaining > 0) {
+            uint32_t to_copy = (remaining > cluster_bytes) ? cluster_bytes : remaining;
+            fat_mem_copy(cluster_buf,
+                         (const uint8_t*)buf + (size - remaining),
+                         to_copy);
+            remaining -= to_copy;
+        }
+        if (!fat_write_cluster(&fs, cur_cluster, cluster_buf)) {
+            if (con) console_printf(con, "fat32_write_file: cluster write failed\n");
+            return 0;
+        }
+        prev_cluster = cur_cluster;
+    }
+
+    /* 5. update dirent: first cluster + size */
+    if (!fat_read_partition_sector(&fs, dirent_lba, sector)) return 0;
+    raw = (FAT32_RAW_DIRENT*)&sector[dirent_offset];
+    raw->first_cluster_hi = (uint16_t)((first_cluster >> 16) & 0xFFFF);
+    raw->first_cluster_lo = (uint16_t)( first_cluster        & 0xFFFF);
+    raw->file_size        = size;
+    if (!fat_write_partition_sector(&fs, dirent_lba, sector)) return 0;
+
+    if (part->parent && !block_flush(part->parent)) {
+        if (con) console_printf(con, "fat32_write_file: warning: flush failed\n");
+    }
+
+    if (con) console_printf(con,
+        "wrote %u bytes to %s (first_cluster=%u, clusters=%u)\n",
+        size, path, first_cluster, clusters_needed);
+    return 1;
+}

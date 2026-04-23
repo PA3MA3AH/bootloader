@@ -56,5 +56,7 @@ int fat32_cat_file(CONSOLE *con, PARTITION_INFO *part, const char *path);
 int fat32_stat_path(CONSOLE *con, PARTITION_INFO *part, const char *path);
 int fat32_view_file(CONSOLE *con, PARTITION_INFO *part, const char *path, uint32_t page_lines);
 int fat32_dump_file(CONSOLE *con, PARTITION_INFO *part, const char *path, uint32_t max_bytes);
+int fat32_write_file(CONSOLE *con, PARTITION_INFO *part,
+                     const char *path, const void *buf, uint32_t size);
 
 #endif

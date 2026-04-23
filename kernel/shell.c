@@ -343,6 +343,7 @@ static void shell_print_help(SHELL *sh) {
     console_printf(sh->con, "  partinfo <part>   - show partition info by index or name\n");
     console_printf(sh->con, "  fatls <part> [p]  - list FAT32 directory (8.3 names)\n");
     console_printf(sh->con, "  fatcat <part> <p> - quick text preview for small files\n");
+    console_printf(sh->con, "  fatwrite <part> <p> <text> - overwrite existing file\n");
     console_printf(sh->con, "  fatview <part> <p>- paged file viewer with line numbers\n");
     console_printf(sh->con, "  fatdump <part> <p>- hex dump first bytes of a file\n");
     console_printf(sh->con, "  fatstat <part> <p>- show FAT32 entry info\n");
@@ -1342,6 +1343,72 @@ static void shell_run_fatcat(SHELL *sh, const char *args) {
     }
 }
 
+static void shell_run_fatwrite(SHELL *sh, const char *args) {
+    PARTITION_INFO *part;
+    char part_name[PARTITION_NAME_MAX];
+    char path[128];
+    const char *text;
+    uint32_t i = 0;
+    uint32_t j;
+    uint32_t text_len;
+
+    if (!args || !*args) {
+        console_printf(sh->con, "Usage: fatwrite <part> <path> <text...>\n");
+        return;
+    }
+
+    /* skip leading spaces */
+    while (args[i] == ' ') i++;
+
+    /* token 1: <part> */
+    j = 0;
+    while (args[i] && args[i] != ' ' && j + 1 < sizeof(part_name)) {
+        part_name[j++] = args[i++];
+    }
+    part_name[j] = '\0';
+    if (j == 0) {
+        console_printf(sh->con, "Usage: fatwrite <part> <path> <text...>\n");
+        return;
+    }
+
+    while (args[i] == ' ') i++;
+
+    /* token 2: <path> (no spaces in FAT32 8.3 paths) */
+    j = 0;
+    while (args[i] && args[i] != ' ' && j + 1 < sizeof(path)) {
+        path[j++] = args[i++];
+    }
+    path[j] = '\0';
+    if (j == 0) {
+        console_printf(sh->con, "Usage: fatwrite <part> <path> <text...>\n");
+        return;
+    }
+
+    while (args[i] == ' ') i++;
+
+    /* rest: text payload (kept verbatim, including inner spaces) */
+    text = &args[i];
+    if (!*text) {
+        console_printf(sh->con,
+            "fatwrite: empty payload (try 'fatwrite %s %s hello world')\n",
+            part_name, path);
+        return;
+    }
+
+    part = shell_find_partition(sh, part_name);
+    if (!part) {
+        console_printf(sh->con, "fatwrite: unknown partition '%s'\n", part_name);
+        return;
+    }
+
+    text_len = 0;
+    while (text[text_len]) text_len++;
+
+    if (!fat32_write_file(sh->con, part, path, text, text_len)) {
+        console_printf(sh->con, "fatwrite: failed on '%s'\n", path);
+    }
+}
+
 static void shell_run_fatview(SHELL *sh, const char *args) {
     PARTITION_INFO *part;
     char path[128];
@@ -1533,6 +1600,11 @@ static void shell_execute(SHELL *sh) {
 
     if (str_starts_with(sh->input, "fatcat ")) {
         shell_run_fatcat(sh, sh->input + 7);
+        return;
+    }
+
+    if (str_starts_with(sh->input, "fatwrite ")) {
+        shell_run_fatwrite(sh, sh->input + 9);
         return;
     }
 
