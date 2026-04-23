@@ -43,7 +43,8 @@ KERNEL_OBJS := \
 		kernel/isr_stubs.o \
 		kernel/ahci.o \
 		kernel/block.o \
-		kernel/partition.o
+		kernel/partition.o \
+		kernel/fat32.o
 
 .PHONY: all build bootloader kernel run clean rebuild tap-up
 
@@ -142,6 +143,9 @@ kernel/block.o: kernel/block.c kernel/block.h | build
 
 kernel/partition.o: kernel/partition.c kernel/partition.h kernel/block.h | build
 		$(CC) $(KERNEL_CFLAGS) -c kernel/partition.c -o $@
+
+kernel/fat32.o: kernel/fat32.c kernel/fat32.h kernel/partition.h kernel/console.h | build
+		$(CC) $(KERNEL_CFLAGS) -c kernel/fat32.c -o $@
 
 image/EFI/BOOT/KERNEL.ELF: $(KERNEL_OBJS)
 		$(LD_KERNEL) $(KERNEL_LDFLAGS) $(KERNEL_OBJS)

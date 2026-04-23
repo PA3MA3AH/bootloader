@@ -11,6 +11,7 @@
 #include "ahci.h"
 #include "block.h"
 #include "partition.h"
+#include "fat32.h"
 
 #define SHELL_PIT_HZ 100
 #define SHELL_HISTORY_MAX 16
@@ -329,7 +330,7 @@ static void shell_print_help(SHELL *sh) {
     console_printf(sh->con, "  ktest             - basic kmalloc/kfree test\n");
     console_printf(sh->con, "  pci               - scan PCI bus and print devices\n");
     console_printf(sh->con, "  pcidump b d f     - dump one PCI device config summary\n");
-    console_printf(sh->con, "  fatinfo [port]   - parse FAT32 boot sector on AHCI disk\n");
+    console_printf(sh->con, "  fatinfo <part>   - show FAT32 info for a partition\n");
     console_printf(sh->con, "  ahci              - probe/init AHCI SATA controller\n");
     console_printf(sh->con, "  ahciports         - list AHCI ports and attached devices\n");
     console_printf(sh->con, "  ahciid <port>     - IDENTIFY DEVICE on one SATA port\n");
@@ -340,6 +341,8 @@ static void shell_print_help(SHELL *sh) {
     console_printf(sh->con, "  part              - list detected partitions\n");
     console_printf(sh->con, "  partscan          - rescan partitions on all disks\n");
     console_printf(sh->con, "  partinfo <part>   - show partition info by index or name\n");
+    console_printf(sh->con, "  fatls <part> [p]  - list FAT32 directory (8.3 names)\n");
+    console_printf(sh->con, "  fatcat <part> <p> - print FAT32 file contents (read-only)\n");
     console_printf(sh->con, "  e1000             - probe and init Intel e1000/e1000e device\n");
     console_printf(sh->con, "  e1000dump         - print extended e1000 debug registers\n");
     console_printf(sh->con, "  e1000rings        - initialize e1000 RX/TX rings\n");
@@ -1215,142 +1218,124 @@ static void shell_run_partinfo(SHELL *sh, const char *args) {
     partition_print_info(sh->con, part);
 }
 
-typedef struct __attribute__((packed)) {
-    uint8_t  jmp_boot[3];
-    uint8_t  oem_name[8];
-    uint16_t bytes_per_sector;
-    uint8_t  sectors_per_cluster;
-    uint16_t reserved_sector_count;
-    uint8_t  num_fats;
-    uint16_t root_entry_count;
-    uint16_t total_sectors_16;
-    uint8_t  media;
-    uint16_t fat_size_16;
-    uint16_t sectors_per_track;
-    uint16_t num_heads;
-    uint32_t hidden_sectors;
-    uint32_t total_sectors_32;
+static int shell_parse_part_and_optional_path(SHELL *sh,
+                                              const char *args,
+                                              PARTITION_INFO **out_part,
+                                              char *path_out,
+                                              uint32_t path_out_size) {
+    uint32_t i = 0;
+    uint32_t j = 0;
+    char part_arg[PARTITION_NAME_MAX];
 
-    uint32_t fat_size_32;
-    uint16_t ext_flags;
-    uint16_t fs_version;
-    uint32_t root_cluster;
-    uint16_t fs_info;
-    uint16_t backup_boot_sector;
-    uint8_t  reserved[12];
-
-    uint8_t  drive_number;
-    uint8_t  reserved1;
-    uint8_t  boot_signature;
-    uint32_t volume_id;
-    uint8_t  volume_label[11];
-    uint8_t  fs_type[8];
-} FAT32_BPB;
-
-static void print_fixed_string(CONSOLE *con, const uint8_t *s, uint32_t len) {
-    uint32_t i;
-    for (i = 0; i < len; i++) {
-        uint8_t c = s[i];
-        if (c == 0) {
-            break;
-        }
-        if (c >= 32 && c <= 126) {
-            console_printf(con, "%c", c);
-        } else {
-            console_printf(con, ".");
-        }
+    if (!args || !out_part || !path_out || path_out_size == 0) {
+        return 0;
     }
+
+    while (args[i] == ' ') {
+        i++;
+    }
+
+    while (args[i] && args[i] != ' ' && j + 1 < sizeof(part_arg)) {
+        part_arg[j++] = args[i++];
+    }
+    part_arg[j] = '\0';
+
+    if (part_arg[0] == '\0') {
+        return 0;
+    }
+
+    *out_part = shell_find_partition(sh, part_arg);
+    if (!*out_part) {
+        return 0;
+    }
+
+    while (args[i] == ' ') {
+        i++;
+    }
+
+    j = 0;
+    while (args[i] && j + 1 < path_out_size) {
+        path_out[j++] = args[i++];
+    }
+    path_out[j] = '\0';
+    return 1;
+}
+
+static int shell_parse_part_and_required_path(SHELL *sh,
+                                              const char *args,
+                                              PARTITION_INFO **out_part,
+                                              char *path_out,
+                                              uint32_t path_out_size) {
+    if (!shell_parse_part_and_optional_path(sh, args, out_part, path_out, path_out_size)) {
+        return 0;
+    }
+
+    if (path_out[0] == '\0') {
+        return 0;
+    }
+
+    return 1;
 }
 
 static void shell_run_fatinfo(SHELL *sh, const char *args) {
-    uint32_t port_no = 0;
-    uint8_t sector[512];
-    FAT32_BPB *bpb;
-    uint32_t total_sectors;
-    uint32_t fat_size;
-    uint32_t data_sectors;
-    uint32_t cluster_count;
-    uint32_t first_data_sector;
+    PARTITION_INFO *part;
+    FAT32_FS fs;
 
-    if (args && *args) {
-        if (!str_to_u32(args, &port_no)) {
-            console_printf(sh->con, "Usage: fatinfo [port]\n");
-            return;
-        }
-    }
-
-    if (!ahci_get_state()->initialized) {
-        if (!ahci_init(ahci_get_state())) {
-            console_printf(sh->con, "fatinfo: AHCI init failed or controller not found\n");
-            return;
-        }
-    }
-
-    if (!ahci_read(port_no, 0, 1, sector)) {
-        console_printf(sh->con, "fatinfo: failed to read boot sector from port %u\n",
-                       (unsigned int)port_no);
+    if (!args || !*args) {
+        console_printf(sh->con, "Usage: fatinfo <part>\n");
         return;
     }
 
-    bpb = (FAT32_BPB*)sector;
-
-    console_printf(sh->con, "FAT boot sector (port %u):\n", (unsigned int)port_no);
-
-    console_printf(sh->con, "  OEM:                  ");
-    print_fixed_string(sh->con, bpb->oem_name, 8);
-    console_printf(sh->con, "\n");
-
-    console_printf(sh->con, "  bytes/sector:         %u\n",
-                   (unsigned int)bpb->bytes_per_sector);
-    console_printf(sh->con, "  sectors/cluster:      %u\n",
-                   (unsigned int)bpb->sectors_per_cluster);
-    console_printf(sh->con, "  reserved sectors:     %u\n",
-                   (unsigned int)bpb->reserved_sector_count);
-    console_printf(sh->con, "  FAT count:            %u\n",
-                   (unsigned int)bpb->num_fats);
-
-    console_printf(sh->con, "  FAT32 fat_size_32:    %u\n",
-                   (unsigned int)bpb->fat_size_32);
-    console_printf(sh->con, "  root cluster:         %u\n",
-                   (unsigned int)bpb->root_cluster);
-    console_printf(sh->con, "  fsinfo sector:        %u\n",
-                   (unsigned int)bpb->fs_info);
-    console_printf(sh->con, "  backup boot sector:   %u\n",
-                   (unsigned int)bpb->backup_boot_sector);
-
-    console_printf(sh->con, "  volume label:         ");
-    print_fixed_string(sh->con, bpb->volume_label, 11);
-    console_printf(sh->con, "\n");
-
-    console_printf(sh->con, "  fs type field:        ");
-    print_fixed_string(sh->con, bpb->fs_type, 8);
-    console_printf(sh->con, "\n");
-
-    total_sectors = bpb->total_sectors_16 ? bpb->total_sectors_16 : bpb->total_sectors_32;
-    fat_size = bpb->fat_size_16 ? bpb->fat_size_16 : bpb->fat_size_32;
-
-    first_data_sector = bpb->reserved_sector_count + ((uint32_t)bpb->num_fats * fat_size);
-    data_sectors = total_sectors - first_data_sector;
-    cluster_count = data_sectors / bpb->sectors_per_cluster;
-
-    console_printf(sh->con, "  total sectors:        %u\n", (unsigned int)total_sectors);
-    console_printf(sh->con, "  first data sector:    %u\n", (unsigned int)first_data_sector);
-    console_printf(sh->con, "  cluster count:        %u\n", (unsigned int)cluster_count);
-
-    if (sector[510] == 0x55 && sector[511] == 0xAA) {
-        console_printf(sh->con, "  boot signature:       55 AA (valid)\n");
-    } else {
-        console_printf(sh->con, "  boot signature:       %x %x (unexpected)\n",
-                       (unsigned int)sector[510],
-                       (unsigned int)sector[511]);
+    part = shell_find_partition(sh, args);
+    if (!part) {
+        return;
     }
 
-    if (bpb->bytes_per_sector != 512) {
-        console_printf(sh->con, "[WARN] bytes_per_sector is not 512\n");
+    if (!fat32_mount(part, &fs)) {
+        console_printf(sh->con, "fatinfo: failed to mount FAT32 on %s\n", part->name);
+        return;
     }
 
-    if (bpb->fat_size_32 == 0) {
-        console_printf(sh->con, "[WARN] fat_size_32 is zero, this may not be FAT32\n");
+    fat32_print_info(sh->con, &fs);
+}
+
+static void shell_run_fatls(SHELL *sh, const char *args) {
+    PARTITION_INFO *part;
+    char path[128];
+
+    if (!args || !*args) {
+        console_printf(sh->con, "Usage: fatls <part> [path]\n");
+        return;
+    }
+
+    if (!shell_parse_part_and_optional_path(sh, args, &part, path, sizeof(path))) {
+        console_printf(sh->con, "Usage: fatls <part> [path]\n");
+        return;
+    }
+
+    if (!fat32_list_directory(sh->con, part, path[0] ? path : "/")) {
+        console_printf(sh->con, "fatls: cannot list '%s' on %s\n",
+                       path[0] ? path : "/",
+                       part->name);
+    }
+}
+
+static void shell_run_fatcat(SHELL *sh, const char *args) {
+    PARTITION_INFO *part;
+    char path[128];
+
+    if (!args || !*args) {
+        console_printf(sh->con, "Usage: fatcat <part> <path>\n");
+        return;
+    }
+
+    if (!shell_parse_part_and_required_path(sh, args, &part, path, sizeof(path))) {
+        console_printf(sh->con, "Usage: fatcat <part> <path>\n");
+        return;
+    }
+
+    if (!fat32_cat_file(sh->con, part, path)) {
+        console_printf(sh->con, "fatcat: cannot read '%s' on %s\n", path, part->name);
     }
 }
 
@@ -1428,13 +1413,18 @@ static void shell_execute(SHELL *sh) {
         return;
     }
 
-    if (str_eq(sh->input, "fatinfo")) {
-        shell_run_fatinfo(sh, 0);
-        return;
-    }
-    
     if (str_starts_with(sh->input, "fatinfo ")) {
         shell_run_fatinfo(sh, sh->input + 8);
+        return;
+    }
+
+    if (str_starts_with(sh->input, "fatls ")) {
+        shell_run_fatls(sh, sh->input + 6);
+        return;
+    }
+
+    if (str_starts_with(sh->input, "fatcat ")) {
+        shell_run_fatcat(sh, sh->input + 7);
         return;
     }
 
