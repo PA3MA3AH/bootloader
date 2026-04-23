@@ -60,5 +60,7 @@ int fat32_write_file(CONSOLE *con, PARTITION_INFO *part,
                      const char *path, const void *buf, uint32_t size);
 int fat32_rename(CONSOLE *con, PARTITION_INFO *part,
                  const char *old_path, const char *new_path);
+int fat32_create_file(CONSOLE *con, PARTITION_INFO *part, const char *path);
+int fat32_delete_file(CONSOLE *con, PARTITION_INFO *part, const char *path);
 
 #endif

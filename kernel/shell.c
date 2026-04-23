@@ -345,6 +345,8 @@ static void shell_print_help(SHELL *sh) {
     console_printf(sh->con, "  fatcat <part> <p> - quick text preview for small files\n");
     console_printf(sh->con, "  fatwrite <part> <p> <text> - overwrite existing file\n");
     console_printf(sh->con, "  fatrename <part> <old> <new> - rename within same dir\n");
+    console_printf(sh->con, "  fattouch <part> <p>  - create empty file\n");
+    console_printf(sh->con, "  fatrm <part> <p>     - delete file\n");
     console_printf(sh->con, "  fatview <part> <p>- paged file viewer with line numbers\n");
     console_printf(sh->con, "  fatdump <part> <p>- hex dump first bytes of a file\n");
     console_printf(sh->con, "  fatstat <part> <p>- show FAT32 entry info\n");
@@ -1452,6 +1454,40 @@ static void shell_run_fatrename(SHELL *sh, const char *args) {
     }
 }
 
+static void shell_run_fattouch(SHELL *sh, const char *args) {
+    PARTITION_INFO *part;
+    char path[128];
+
+    if (!args || !*args) {
+        console_printf(sh->con, "Usage: fattouch <part> <path>\n");
+        return;
+    }
+    if (!shell_parse_part_and_required_path(sh, args, &part, path, sizeof(path))) {
+        console_printf(sh->con, "Usage: fattouch <part> <path>\n");
+        return;
+    }
+    if (!fat32_create_file(sh->con, part, path)) {
+        console_printf(sh->con, "fattouch: failed on '%s'\n", path);
+    }
+}
+
+static void shell_run_fatrm(SHELL *sh, const char *args) {
+    PARTITION_INFO *part;
+    char path[128];
+
+    if (!args || !*args) {
+        console_printf(sh->con, "Usage: fatrm <part> <path>\n");
+        return;
+    }
+    if (!shell_parse_part_and_required_path(sh, args, &part, path, sizeof(path))) {
+        console_printf(sh->con, "Usage: fatrm <part> <path>\n");
+        return;
+    }
+    if (!fat32_delete_file(sh->con, part, path)) {
+        console_printf(sh->con, "fatrm: failed on '%s'\n", path);
+    }
+}
+
 static void shell_run_fatview(SHELL *sh, const char *args) {
     PARTITION_INFO *part;
     char path[128];
@@ -1653,6 +1689,15 @@ static void shell_execute(SHELL *sh) {
 
     if (str_starts_with(sh->input, "fatrename ")) {
         shell_run_fatrename(sh, sh->input + 10);
+        return;
+    }
+
+    if (str_starts_with(sh->input, "fattouch ")) {
+        shell_run_fattouch(sh, sh->input + 9);
+        return;
+    }
+    if (str_starts_with(sh->input, "fatrm ")) {
+        shell_run_fatrm(sh, sh->input + 6);
         return;
     }
 

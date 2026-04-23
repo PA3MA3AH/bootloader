@@ -1518,3 +1518,218 @@ int fat32_rename(CONSOLE *con, PARTITION_INFO *part,
     if (con) console_printf(con, "renamed '%s' -> '%s'\n", old_path, new_path);
     return 1;
 }
+
+/* ============================================================
+ * Stage 4: create + delete (8.3 names only).
+ * ============================================================ */
+
+/* Find a free dirent slot in the directory whose chain starts at
+ * `dir_cluster`. A slot is either a tombstone (name[0] == 0xE5) or
+ * the first end-of-directory marker (name[0] == 0x00). On success,
+ * out_lba/out_offset point to the slot and *out_was_terminator
+ * indicates if the slot was the 0x00 marker (caller must keep the
+ * terminator chain alive). On failure, returns 0 — caller should
+ * grow the directory by allocating a new cluster. */
+static int fat_find_free_dirent_slot(const FAT32_FS *fs,
+                                     uint32_t dir_cluster,
+                                     uint64_t *out_lba,
+                                     uint32_t *out_offset,
+                                     int *out_was_terminator,
+                                     uint32_t *out_last_cluster)
+{
+    uint8_t  sector[FAT32_SECTOR_SIZE];
+    uint32_t cluster = dir_cluster;
+    uint32_t next;
+    uint32_t s, e;
+
+    if (!fs || !out_lba || !out_offset || !out_was_terminator || !out_last_cluster) {
+        return 0;
+    }
+
+    while (fat_is_valid_data_cluster(fs, cluster)) {
+        uint32_t base_lba = fat_cluster_to_lba(fs, cluster);
+        *out_last_cluster = cluster;
+
+        for (s = 0; s < fs->sectors_per_cluster; s++) {
+            uint64_t sector_lba = base_lba + s;
+            if (!fat_read_partition_sector(fs, sector_lba, sector)) return 0;
+
+            for (e = 0; e < FAT32_SECTOR_SIZE / FAT32_DIRENT_SIZE; e++) {
+                FAT32_RAW_DIRENT *raw =
+                    (FAT32_RAW_DIRENT*)&sector[e * FAT32_DIRENT_SIZE];
+
+                if (raw->name[0] == 0xE5) {
+                    *out_lba = sector_lba;
+                    *out_offset = e * FAT32_DIRENT_SIZE;
+                    *out_was_terminator = 0;
+                    return 1;
+                }
+                if (raw->name[0] == 0x00) {
+                    *out_lba = sector_lba;
+                    *out_offset = e * FAT32_DIRENT_SIZE;
+                    *out_was_terminator = 1;
+                    return 1;
+                }
+            }
+        }
+        if (!fat_read_fat_entry(fs, cluster, &next)) return 0;
+        if (fat_is_eoc(next)) break;
+        if (next == cluster) return 0;
+        cluster = next;
+    }
+    return 0;
+}
+
+int fat32_create_file(CONSOLE *con, PARTITION_INFO *part, const char *path) {
+    FAT32_FS fs;
+    uint32_t parent_cluster;
+    char     leaf[FAT32_MAX_COMPONENT_LEN];
+    uint8_t  short_name[11];
+    uint64_t dummy_lba;
+    uint32_t dummy_offset;
+    uint64_t slot_lba;
+    uint32_t slot_offset;
+    int      was_terminator = 0;
+    uint32_t last_dir_cluster = 0;
+    uint32_t new_dir_cluster;
+    uint8_t  zero_cluster[FAT32_SECTOR_SIZE * 8U];
+    uint8_t  sector[FAT32_SECTOR_SIZE];
+    FAT32_RAW_DIRENT new_dirent;
+    uint32_t cluster_bytes;
+
+    if (!part || !path) return 0;
+    if (!fat32_mount(part, &fs)) {
+        if (con) console_printf(con, "fat32_create_file: mount failed\n");
+        return 0;
+    }
+
+    cluster_bytes = (uint32_t)fs.bytes_per_sector * (uint32_t)fs.sectors_per_cluster;
+    if (cluster_bytes > sizeof(zero_cluster)) {
+        if (con) console_printf(con, "fat32_create_file: cluster too big\n");
+        return 0;
+    }
+
+    if (!fat_resolve_parent_dir(&fs, path, &parent_cluster, leaf, sizeof(leaf))) {
+        if (con) console_printf(con, "fat32_create_file: bad parent dir\n");
+        return 0;
+    }
+    if (!fat_component_to_short_name(leaf, short_name)) {
+        if (con) console_printf(con,
+            "fat32_create_file: '%s' not a valid 8.3 name\n", leaf);
+        return 0;
+    }
+    if (fat_locate_dirent_in_directory(&fs, parent_cluster, leaf,
+                                       &dummy_lba, &dummy_offset)) {
+        if (con) console_printf(con,
+            "fat32_create_file: '%s' already exists\n", path);
+        return 0;
+    }
+
+    /* try to reuse an existing slot, otherwise grow the directory */
+    if (!fat_find_free_dirent_slot(&fs, parent_cluster,
+                                   &slot_lba, &slot_offset,
+                                   &was_terminator, &last_dir_cluster)) {
+        /* grow directory: alloc new cluster, link, zero, slot at offset 0 */
+        if (!fat_alloc_cluster(&fs, &new_dir_cluster)) {
+            if (con) console_printf(con,
+                "fat32_create_file: out of space (extending dir)\n");
+            return 0;
+        }
+        if (last_dir_cluster) {
+            if (!fat_write_fat_entry(&fs, last_dir_cluster, new_dir_cluster)) return 0;
+        }
+        fat_mem_zero(zero_cluster, cluster_bytes);
+        if (!fat_write_cluster(&fs, new_dir_cluster, zero_cluster)) return 0;
+        slot_lba = fat_cluster_to_lba(&fs, new_dir_cluster);
+        slot_offset = 0;
+        was_terminator = 1;
+    }
+
+    /* Build new dirent (empty file, no clusters yet). */
+    fat_mem_zero(&new_dirent, sizeof(new_dirent));
+    fat_mem_copy(new_dirent.name, short_name, 11);
+    new_dirent.attr = FAT32_ATTR_ARCHIVE;
+    /* first_cluster_hi/lo and file_size already zero */
+
+    if (!fat_write_dirent_at(&fs, slot_lba, slot_offset, &new_dirent)) return 0;
+
+    /* If we used the 0x00 terminator, ensure the next dirent in same
+     * sector still terminates the listing. Otherwise old garbage could
+     * be interpreted as further entries. */
+    if (was_terminator) {
+        if (slot_offset + FAT32_DIRENT_SIZE < FAT32_SECTOR_SIZE) {
+            if (!fat_read_partition_sector(&fs, slot_lba, sector)) return 0;
+            sector[slot_offset + FAT32_DIRENT_SIZE] = 0x00;
+            if (!fat_write_partition_sector(&fs, slot_lba, sector)) return 0;
+        }
+        /* If the slot was the very last dirent of the sector, the
+         * remaining sectors of the cluster (and any newly grown
+         * cluster) are already zeroed by mkfs/our zero_cluster path,
+         * so 0x00 termination holds naturally. */
+    }
+
+    if (part->parent && !block_flush(part->parent)) {
+        if (con) console_printf(con, "fat32_create_file: warning: flush failed\n");
+    }
+
+    if (con) console_printf(con, "created '%s'\n", path);
+    return 1;
+}
+
+int fat32_delete_file(CONSOLE *con, PARTITION_INFO *part, const char *path) {
+    FAT32_FS fs;
+    uint32_t parent_cluster;
+    char     leaf[FAT32_MAX_COMPONENT_LEN];
+    uint64_t dirent_lba;
+    uint32_t dirent_offset;
+    uint8_t  sector[FAT32_SECTOR_SIZE];
+    FAT32_RAW_DIRENT *raw;
+    uint32_t first_cluster;
+
+    if (!part || !path) return 0;
+    if (!fat32_mount(part, &fs)) {
+        if (con) console_printf(con, "fat32_delete_file: mount failed\n");
+        return 0;
+    }
+
+    if (!fat_resolve_parent_dir(&fs, path, &parent_cluster, leaf, sizeof(leaf))) {
+        if (con) console_printf(con, "fat32_delete_file: bad parent dir\n");
+        return 0;
+    }
+    if (!fat_locate_dirent_in_directory(&fs, parent_cluster, leaf,
+                                        &dirent_lba, &dirent_offset)) {
+        if (con) console_printf(con, "fat32_delete_file: '%s' not found\n", path);
+        return 0;
+    }
+
+    if (!fat_read_partition_sector(&fs, dirent_lba, sector)) return 0;
+    raw = (FAT32_RAW_DIRENT*)&sector[dirent_offset];
+
+    if (raw->attr & FAT32_ATTR_DIRECTORY) {
+        if (con) console_printf(con,
+            "fat32_delete_file: '%s' is a directory (Stage 4 limit)\n", path);
+        return 0;
+    }
+
+    first_cluster = ((uint32_t)raw->first_cluster_hi << 16) |
+                    (uint32_t)raw->first_cluster_lo;
+    if (first_cluster >= 2U) {
+        if (!fat_free_cluster_chain(&fs, first_cluster)) {
+            if (con) console_printf(con, "fat32_delete_file: free chain failed\n");
+            return 0;
+        }
+    }
+
+    /* Tombstone the dirent. NOTE: any preceding LFN-entry chain
+     * is left orphaned; both Linux and Windows tolerate this and
+     * fsck.fat will clean them up. Proper LFN cleanup TODO. */
+    sector[dirent_offset] = 0xE5;
+    if (!fat_write_partition_sector(&fs, dirent_lba, sector)) return 0;
+
+    if (part->parent && !block_flush(part->parent)) {
+        if (con) console_printf(con, "fat32_delete_file: warning: flush failed\n");
+    }
+
+    if (con) console_printf(con, "deleted '%s'\n", path);
+    return 1;
+}
