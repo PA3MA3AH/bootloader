@@ -4,6 +4,7 @@
 #include "pmm.h"
 #include "console.h"
 #include "panic.h"
+#include "block.h"
 
 #include <stdint.h>
 #include <stddef.h>
@@ -41,6 +42,7 @@
 
 #define ATA_CMD_IDENTIFY        0xEC
 #define ATA_CMD_READ_DMA_EXT    0x25
+#define ATA_CMD_WRITE_DMA_EXT   0x35
 
 #define ATA_DEV_BUSY            0x80
 #define ATA_DEV_DRQ             0x08
@@ -176,6 +178,7 @@ typedef struct {
 
 static AHCI_INFO g_ahci;
 static AHCI_PORT_MEM g_port_mem[AHCI_MAX_PORTS];
+static uint8_t g_ahci_block_registered[AHCI_MAX_PORTS];
 
 static void mem_zero(void *dst, uint64_t size) {
     uint8_t *p = (uint8_t*)dst;
@@ -765,7 +768,11 @@ int ahci_identify(uint32_t port_no, AHCI_PORT_INFO *out_info) {
     return ahci_fill_port_info(port_no, out_info);
 }
 
-int ahci_read(uint32_t port_no, uint64_t lba, uint32_t count, void *out_buf) {
+static int ahci_rw(uint32_t port_no,
+                   uint64_t lba,
+                   uint32_t count,
+                   void *buffer,
+                   int is_write) {
     HBA_MEM *abar;
     HBA_PORT *port;
     AHCI_PORT_MEM *pm;
@@ -775,11 +782,19 @@ int ahci_read(uint32_t port_no, uint64_t lba, uint32_t count, void *out_buf) {
     int slot;
     uint32_t bytes;
 
-    if (!g_ahci.initialized || !out_buf) {
+    if (!g_ahci.initialized || !buffer) {
         return 0;
     }
 
-    if (port_no >= AHCI_MAX_PORTS || count == 0 || count > AHCI_MAX_READ_SECTORS) {
+    if (port_no >= AHCI_MAX_PORTS || count == 0) {
+        return 0;
+    }
+
+    if (!is_write && count > AHCI_MAX_READ_SECTORS) {
+        return 0;
+    }
+
+    if (is_write && count > AHCI_MAX_WRITE_SECTORS) {
         return 0;
     }
 
@@ -804,12 +819,16 @@ int ahci_read(uint32_t port_no, uint64_t lba, uint32_t count, void *out_buf) {
         return 0;
     }
 
-    bytes = count * 512U;
+    bytes = count * AHCI_SECTOR_SIZE;
     if (bytes > pm->dma_bytes) {
         return 0;
     }
 
-    mem_zero(pm->dma_virt, bytes);
+    if (is_write) {
+        mem_copy(pm->dma_virt, buffer, bytes);
+    } else {
+        mem_zero(pm->dma_virt, bytes);
+    }
 
     cmdhdr = (HBA_CMD_HEADER*)pm->clb_virt;
     cmdtbl = (HBA_CMD_TBL*)pm->ctba_virt;
@@ -817,7 +836,7 @@ int ahci_read(uint32_t port_no, uint64_t lba, uint32_t count, void *out_buf) {
     mem_zero(cmdtbl, sizeof(HBA_CMD_TBL));
 
     cmdhdr[slot].cfl = sizeof(FIS_REG_H2D) / sizeof(uint32_t);
-    cmdhdr[slot].w = 0;
+    cmdhdr[slot].w = is_write ? 1 : 0;
     cmdhdr[slot].prdtl = 1;
     cmdhdr[slot].prdbc = 0;
     cmdhdr[slot].ctba = (uint32_t)(pm->ctba_phys & 0xFFFFFFFFU);
@@ -832,8 +851,8 @@ int ahci_read(uint32_t port_no, uint64_t lba, uint32_t count, void *out_buf) {
     mem_zero(fis, sizeof(FIS_REG_H2D));
     fis->fis_type = FIS_TYPE_REG_H2D;
     fis->c = 1;
-    fis->command = ATA_CMD_READ_DMA_EXT;
-    fis->device = 1U << 6; /* LBA mode */
+    fis->command = is_write ? ATA_CMD_WRITE_DMA_EXT : ATA_CMD_READ_DMA_EXT;
+    fis->device = 1U << 6;
 
     fis->lba0 = (uint8_t)(lba >> 0);
     fis->lba1 = (uint8_t)(lba >> 8);
@@ -862,6 +881,124 @@ int ahci_read(uint32_t port_no, uint64_t lba, uint32_t count, void *out_buf) {
         return 0;
     }
 
-    mem_copy(out_buf, pm->dma_virt, bytes);
+    if (!is_write) {
+        mem_copy(buffer, pm->dma_virt, bytes);
+    }
+
+    return 1;
+}
+
+int ahci_read(uint32_t port_no, uint64_t lba, uint32_t count, void *out_buf) {
+    return ahci_rw(port_no, lba, count, out_buf, 0);
+}
+
+int ahci_write(uint32_t port_no, uint64_t lba, uint32_t count, const void *in_buf) {
+    return ahci_rw(port_no, lba, count, (void*)in_buf, 1);
+}
+
+static int ahci_block_read(BLOCK_DEVICE *dev, uint64_t lba, uint32_t count, void *out_buf) {
+    uint32_t port_no;
+
+    if (!dev) {
+        return 0;
+    }
+
+    port_no = (uint32_t)(uintptr_t)dev->driver_data;
+    return ahci_read(port_no, lba, count, out_buf);
+}
+
+static int ahci_block_write(BLOCK_DEVICE *dev, uint64_t lba, uint32_t count, const void *in_buf) {
+    uint32_t port_no;
+
+    if (!dev) {
+        return 0;
+    }
+
+    port_no = (uint32_t)(uintptr_t)dev->driver_data;
+    return ahci_write(port_no, lba, count, in_buf);
+}
+
+static int ahci_block_flush(BLOCK_DEVICE *dev) {
+    (void)dev;
+    return 1;
+}
+
+int ahci_register_block_devices(void) {
+    static const BLOCK_DEVICE_OPS ahci_block_ops = {
+        .read = ahci_block_read,
+        .write = ahci_block_write,
+        .flush = ahci_block_flush
+    };
+
+    uint32_t port_no;
+    uint32_t disk_index = block_get_count();
+
+    if (!g_ahci.initialized) {
+        return 0;
+    }
+
+    if (!block_is_initialized()) {
+        return 0;
+    }
+
+    for (port_no = 0; port_no < AHCI_MAX_PORTS; port_no++) {
+        AHCI_PORT_INFO pi;
+        BLOCK_DEVICE dev;
+        uint64_t total_sectors;
+
+        if ((g_ahci.ports_implemented & (1U << port_no)) == 0) {
+            continue;
+        }
+
+        if (g_ahci_block_registered[port_no]) {
+            continue;
+        }
+
+        if (!ahci_identify(port_no, &pi)) {
+            continue;
+        }
+
+        if (!pi.active) {
+            continue;
+        }
+
+        total_sectors = pi.sectors_48 ? pi.sectors_48 : pi.sectors_28;
+        if (total_sectors == 0) {
+            continue;
+        }
+
+        mem_zero(&dev, sizeof(dev));
+        dev.present = 1;
+        dev.type = BLOCK_TYPE_DISK;
+        dev.flags = BLOCK_FLAG_PRESENT;
+        dev.sector_size = AHCI_SECTOR_SIZE;
+        dev.total_sectors = total_sectors;
+        dev.total_bytes = total_sectors * (uint64_t)AHCI_SECTOR_SIZE;
+        dev.driver_name = "ahci";
+        dev.driver_data = (void*)(uintptr_t)port_no;
+        dev.ops = &ahci_block_ops;
+
+        dev.name[0] = 's';
+        dev.name[1] = 'd';
+        dev.name[2] = (char)('0' + (disk_index % 10));
+        dev.name[3] = '\0';
+
+        if (pi.model[0]) {
+            uint32_t i = 0;
+            while (i + 1 < sizeof(dev.model) && pi.model[i]) {
+                dev.model[i] = pi.model[i];
+                i++;
+            }
+            dev.model[i] = '\0';
+        }
+
+        if (!block_register_device(&dev)) {
+            return 0;
+        }
+
+        g_ahci_block_registered[port_no] = 1;
+        disk_index++;
+    }
+
     return 1;
 }

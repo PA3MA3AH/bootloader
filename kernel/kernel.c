@@ -11,6 +11,7 @@
 #include "kheap.h"
 #include "vmm.h"
 #include "ahci.h"
+#include "block.h"
 
 #define KERNEL_PIT_HZ 100
 
@@ -226,10 +227,41 @@ static void kernel_init_heap(CONSOLE *con, BOOT_INFO *boot_info) {
     console_printf(con, "      Heap is ready.\n\n");
 }
 
+
+static void kernel_init_storage(CONSOLE *con) {
+    AHCI_INFO *ahci;
+
+    panic_set_stage("storage init");
+
+    console_printf(con, "[4/6] Storage init...\n");
+
+    block_init();
+    console_printf(con, "      Block layer initialized.\n");
+
+    ahci = ahci_get_state();
+    if (!ahci->initialized) {
+        if (!ahci_init(ahci)) {
+            console_printf(con, "      AHCI controller not found or init failed.\n");
+            console_printf(con, "      Storage stack will stay offline.\n\n");
+            return;
+        }
+    }
+
+    console_printf(con, "      AHCI controller ready.\n");
+
+    if (!ahci_register_block_devices()) {
+        console_printf(con, "      AHCI block registration failed.\n\n");
+        return;
+    }
+
+    block_print_devices(con);
+    console_printf(con, "\n");
+}
+
 static void kernel_init_input(CONSOLE *con) {
     panic_set_stage("input subsystem init");
 
-    console_printf(con, "[4/5] Input subsystem init...\n");
+    console_printf(con, "[5/6] Input subsystem init...\n");
 
     keyboard_init();
 
@@ -244,7 +276,7 @@ static void kernel_init_shell(CONSOLE *con,
                               SHELL *sh) {
     panic_set_stage("shell init");
 
-    console_printf(con, "[5/5] Shell init...\n");
+    console_printf(con, "[6/6] Shell init...\n");
 
     shell_init(sh, con, boot_info);
 
@@ -306,6 +338,7 @@ void kernel_main(BOOT_INFO *boot_info) {
     kernel_init_interrupt_core(&con);
     kernel_init_memory(&con, boot_info);
     kernel_init_heap(&con, boot_info);
+    kernel_init_storage(&con);
     kernel_init_input(&con);
     kernel_init_shell(&con, boot_info, &sh);
     kernel_prepare_timer(&con);

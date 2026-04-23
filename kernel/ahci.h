@@ -6,6 +6,8 @@
 
 #define AHCI_MAX_PORTS 32
 #define AHCI_MAX_READ_SECTORS 8
+#define AHCI_MAX_WRITE_SECTORS 8
+#define AHCI_SECTOR_SIZE      512U
 
 typedef struct {
     int present;
@@ -59,5 +61,8 @@ int ahci_identify(uint32_t port_no, AHCI_PORT_INFO *out_info);
 
 /* count: 1..8 sectors currently */
 int ahci_read(uint32_t port_no, uint64_t lba, uint32_t count, void *out_buf);
+int ahci_write(uint32_t port_no, uint64_t lba, uint32_t count, const void *in_buf);
+
+int ahci_register_block_devices(void);
 
 #endif

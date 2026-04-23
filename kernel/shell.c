@@ -9,6 +9,7 @@
 #include "e1000.h"
 #include "net.h"
 #include "ahci.h"
+#include "block.h"
 
 #define SHELL_PIT_HZ 100
 #define SHELL_HISTORY_MAX 16
@@ -332,6 +333,9 @@ static void shell_print_help(SHELL *sh) {
     console_printf(sh->con, "  ahciports         - list AHCI ports and attached devices\n");
     console_printf(sh->con, "  ahciid <port>     - IDENTIFY DEVICE on one SATA port\n");
     console_printf(sh->con, "  readlba p lba n   - read 1..8 sectors from SATA disk\n");
+    console_printf(sh->con, "  blk               - list generic block devices\n");
+    console_printf(sh->con, "  blkid <dev>       - show block device info by index or name\n");
+    console_printf(sh->con, "  blkread d lba n   - read 1..8 sectors via block layer\n");
     console_printf(sh->con, "  e1000             - probe and init Intel e1000/e1000e device\n");
     console_printf(sh->con, "  e1000dump         - print extended e1000 debug registers\n");
     console_printf(sh->con, "  e1000rings        - initialize e1000 RX/TX rings\n");
@@ -1010,6 +1014,156 @@ static void shell_run_readlba(SHELL *sh, const char *args) {
     shell_hex_dump(sh, buf, count * 512U);
 }
 
+
+static int parse_u32_or_name_arg(const char *args, uint32_t *index, char *name_out, uint32_t name_out_size) {
+    uint32_t i = 0;
+    uint32_t j = 0;
+
+    if (!args) {
+        return 0;
+    }
+
+    while (args[i] == ' ') {
+        i++;
+    }
+
+    if (args[i] == '\0') {
+        return 0;
+    }
+
+    while (args[i] && args[i] != ' ' && j + 1 < name_out_size) {
+        name_out[j++] = args[i++];
+    }
+    name_out[j] = '\0';
+
+    while (args[i] == ' ') {
+        i++;
+    }
+
+    if (args[i] != '\0') {
+        return 0;
+    }
+
+    if (str_to_u32(name_out, index)) {
+        return 1;
+    }
+
+    return 2;
+}
+
+static BLOCK_DEVICE *shell_find_block_device(SHELL *sh, const char *arg) {
+    uint32_t index = 0;
+    char name[BLOCK_NAME_MAX];
+    int mode;
+
+    mode = parse_u32_or_name_arg(arg, &index, name, sizeof(name));
+    if (mode == 0) {
+        console_printf(sh->con, "Usage: blkid <dev>  or  blkread <dev> <lba> <count>\n");
+        return 0;
+    }
+
+    if (mode == 1) {
+        BLOCK_DEVICE *dev = block_get_device(index);
+        if (!dev) {
+            console_printf(sh->con, "block: device index %u not found\n", (unsigned int)index);
+        }
+        return dev;
+    }
+
+    {
+        BLOCK_DEVICE *dev = block_find_by_name(name);
+        if (!dev) {
+            console_printf(sh->con, "block: device '%s' not found\n", name);
+        }
+        return dev;
+    }
+}
+
+static void shell_run_blk(SHELL *sh) {
+    block_print_devices(sh->con);
+}
+
+static void shell_run_blkid(SHELL *sh, const char *args) {
+    BLOCK_DEVICE *dev = shell_find_block_device(sh, args);
+    if (!dev) {
+        return;
+    }
+
+    block_print_device_info(sh->con, dev);
+}
+
+static void shell_run_blkread(SHELL *sh, const char *args) {
+    char dev_part[32];
+    char lba_part[32];
+    char count_part[32];
+    uint32_t i = 0;
+    uint32_t j = 0;
+    uint32_t lba32 = 0;
+    uint32_t count = 0;
+    BLOCK_DEVICE *dev;
+    uint8_t buf[AHCI_MAX_READ_SECTORS * AHCI_SECTOR_SIZE];
+
+    if (!args) {
+        console_printf(sh->con, "Usage: blkread <dev> <lba> <count>\n");
+        return;
+    }
+
+    while (args[i] == ' ') i++;
+    while (args[i] && args[i] != ' ' && j + 1 < sizeof(dev_part)) dev_part[j++] = args[i++];
+    dev_part[j] = '\0';
+
+    while (args[i] == ' ') i++;
+    j = 0;
+    while (args[i] && args[i] != ' ' && j + 1 < sizeof(lba_part)) lba_part[j++] = args[i++];
+    lba_part[j] = '\0';
+
+    while (args[i] == ' ') i++;
+    j = 0;
+    while (args[i] && args[i] != ' ' && j + 1 < sizeof(count_part)) count_part[j++] = args[i++];
+    count_part[j] = '\0';
+
+    while (args[i] == ' ') i++;
+    if (args[i] != '\0') {
+        console_printf(sh->con, "Usage: blkread <dev> <lba> <count>\n");
+        return;
+    }
+
+    dev = shell_find_block_device(sh, dev_part);
+    if (!dev) {
+        return;
+    }
+
+    if (!str_to_u32(lba_part, &lba32) || !str_to_u32(count_part, &count)) {
+        console_printf(sh->con, "Usage: blkread <dev> <lba> <count>\n");
+        return;
+    }
+
+    if (count == 0 || count > AHCI_MAX_READ_SECTORS) {
+        console_printf(sh->con, "blkread: count must be 1..8\n");
+        return;
+    }
+
+    if (dev->sector_size != AHCI_SECTOR_SIZE) {
+        console_printf(sh->con, "blkread: only 512-byte sectors are supported right now\n");
+        return;
+    }
+
+    if (!block_read(dev, (uint64_t)lba32, count, buf)) {
+        console_printf(sh->con, "blkread: read failed (dev=%s lba=%u count=%u)\n",
+                       dev->name,
+                       (unsigned int)lba32,
+                       (unsigned int)count);
+        return;
+    }
+
+    console_printf(sh->con, "blkread: ok (dev=%s lba=%u count=%u)\n",
+                   dev->name,
+                   (unsigned int)lba32,
+                   (unsigned int)count);
+
+    shell_hex_dump(sh, buf, count * AHCI_SECTOR_SIZE);
+}
+
 typedef struct __attribute__((packed)) {
     uint8_t  jmp_boot[3];
     uint8_t  oem_name[8];
@@ -1250,6 +1404,21 @@ static void shell_execute(SHELL *sh) {
 
     if (str_starts_with(sh->input, "readlba ")) {
         shell_run_readlba(sh, sh->input + 8);
+        return;
+    }
+
+    if (str_eq(sh->input, "blk")) {
+        shell_run_blk(sh);
+        return;
+    }
+
+    if (str_starts_with(sh->input, "blkid ")) {
+        shell_run_blkid(sh, sh->input + 6);
+        return;
+    }
+
+    if (str_starts_with(sh->input, "blkread ")) {
+        shell_run_blkread(sh, sh->input + 8);
         return;
     }
 

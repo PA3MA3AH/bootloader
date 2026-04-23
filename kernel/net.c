@@ -124,10 +124,10 @@ static E1000_INFO *g_nic = 0;
 static int g_initialized = 0;
 
 /* Default to QEMU SLIRP layout */
-static const uint8_t SLIRP_IP[4]      = { 10, 0, 2, 15 };
+static const uint8_t SLIRP_IP[4]      = { 192, 168, 100, 50  };
 static const uint8_t SLIRP_NETMASK[4] = { 255, 255, 255, 0 };
-static const uint8_t SLIRP_GATEWAY[4] = { 10, 0, 2, 2 };
-static const uint8_t SLIRP_DNS[4]     = { 10, 0, 2, 3 };
+static const uint8_t SLIRP_GATEWAY[4] = { 192, 168, 100, 1 };
+static const uint8_t SLIRP_DNS[4]     = { 1, 1, 1, 1 };
 
 static const uint8_t MAC_BROADCAST[6] = {
     0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF

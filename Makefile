@@ -42,8 +42,9 @@ KERNEL_OBJS := \
 		kernel/exceptions.o \
 		kernel/isr_stubs.o \
 		kernel/ahci.o \
+		kernel/block.o
 
-.PHONY: all build bootloader kernel run clean rebuild
+.PHONY: all build bootloader kernel run clean rebuild tap-up
 
 all: build bootloader kernel
 
@@ -135,10 +136,16 @@ kernel/isr_stubs.o: kernel/isr_stubs.asm | build
 kernel/ahci.o: kernel/ahci.c kernel/ahci.h | build
 		$(CC) $(KERNEL_CFLAGS) -c kernel/ahci.c -o $@
 
+kernel/block.o: kernel/block.c kernel/block.h | build
+		$(CC) $(KERNEL_CFLAGS) -c kernel/block.c -o $@
+
 image/EFI/BOOT/KERNEL.ELF: $(KERNEL_OBJS)
 		$(LD_KERNEL) $(KERNEL_LDFLAGS) $(KERNEL_OBJS)
 
-run: all $(OVMF_VARS_DST)
+tap-up:
+	@sudo scripts/tap-setup.sh
+
+run: all $(OVMF_VARS_DST) tap-up
 	qemu-system-x86_64 \
 		-machine q35 \
 		-m 512M \
