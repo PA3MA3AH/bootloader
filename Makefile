@@ -46,7 +46,7 @@ KERNEL_OBJS := \
 		kernel/partition.o \
 		kernel/fat32.o
 
-.PHONY: all build bootloader kernel run clean rebuild tap-up
+.PHONY: all build bootloader kernel run clean rebuild tap-up disk disk-rebuild disk-clean
 
 all: build bootloader kernel
 
@@ -153,7 +153,15 @@ image/EFI/BOOT/KERNEL.ELF: $(KERNEL_OBJS)
 tap-up:
 	@sudo scripts/tap-setup.sh
 
-run: all $(OVMF_VARS_DST) tap-up
+disk:
+	@./scripts/mkdisk.sh
+
+disk-rebuild: disk-clean disk
+
+disk-clean:
+	@rm -f disk.img && echo "[disk-clean] disk.img removed"
+
+run: all $(OVMF_VARS_DST) tap-up disk
 	qemu-system-x86_64 \
 		-machine q35 \
 		-m 512M \

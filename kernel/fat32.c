@@ -401,6 +401,220 @@ static int fat_find_entry_in_directory(const FAT32_FS *fs,
     return 0;
 }
 
+/* ============================================================
+ * Stage 1: write primitives. Чистые добавки, read-paths не трогаем.
+ * ============================================================ */
+
+static int fat_write_partition_sector(const FAT32_FS *fs,
+                                      uint64_t lba,
+                                      const uint8_t *buf)
+{
+    if (!fs || !buf) {
+        return 0;
+    }
+    return partition_write(fs->partition, lba, 1, buf);
+}
+
+/* Write a 32-bit FAT entry, preserving the reserved top 4 bits.
+ * Mirrors the change into every FAT copy (fs->num_fats). */
+static int fat_write_fat_entry(const FAT32_FS *fs,
+                               uint32_t cluster,
+                               uint32_t value)
+{
+    uint32_t fat_offset;
+    uint32_t sector_in_fat;
+    uint32_t sector_offset;
+    uint8_t  sector[FAT32_SECTOR_SIZE];
+    uint32_t old;
+    uint32_t i;
+    uint32_t lba;
+
+    if (!fs) {
+        return 0;
+    }
+
+    fat_offset    = cluster * 4U;
+    sector_in_fat = fat_offset / (uint32_t)fs->bytes_per_sector;
+    sector_offset = fat_offset % (uint32_t)fs->bytes_per_sector;
+
+    if (sector_offset + 4U > (uint32_t)fs->bytes_per_sector) {
+        return 0;
+    }
+
+    lba = fs->first_fat_sector + sector_in_fat;
+    if (!fat_read_partition_sector(fs, lba, sector)) {
+        return 0;
+    }
+
+    old   = fat_read_u32_le(&sector[sector_offset]);
+    value = (old & 0xF0000000U) | (value & FAT32_CLUSTER_MASK);
+
+    sector[sector_offset + 0] = (uint8_t)( value        & 0xFF);
+    sector[sector_offset + 1] = (uint8_t)((value >> 8)  & 0xFF);
+    sector[sector_offset + 2] = (uint8_t)((value >> 16) & 0xFF);
+    sector[sector_offset + 3] = (uint8_t)((value >> 24) & 0xFF);
+
+    for (i = 0; i < fs->num_fats; i++) {
+        lba = fs->first_fat_sector + i * fs->fat_size_sectors + sector_in_fat;
+        if (!fat_write_partition_sector(fs, lba, sector)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* Linear scan through the FAT for the first free cluster.
+ * On success, marks it as EOC and returns its number in *out_cluster. */
+static int fat_alloc_cluster(const FAT32_FS *fs, uint32_t *out_cluster) {
+    uint32_t entries_per_sector;
+    uint32_t s, e;
+    uint8_t  sector[FAT32_SECTOR_SIZE];
+    uint32_t cluster_no;
+    uint32_t value;
+
+    if (!fs || !out_cluster) {
+        return 0;
+    }
+
+    entries_per_sector = (uint32_t)fs->bytes_per_sector / 4U;
+
+    for (s = 0; s < fs->fat_size_sectors; s++) {
+        if (!fat_read_partition_sector(fs, fs->first_fat_sector + s, sector)) {
+            return 0;
+        }
+        for (e = 0; e < entries_per_sector; e++) {
+            cluster_no = s * entries_per_sector + e;
+            if (cluster_no < 2U) continue;
+            if (cluster_no >= fs->cluster_count + 2U) {
+                return 0; /* exhausted data clusters */
+            }
+            value = fat_read_u32_le(&sector[e * 4U]) & FAT32_CLUSTER_MASK;
+            if (value == FAT32_CLUSTER_FREE) {
+                if (!fat_write_fat_entry(fs, cluster_no, FAT32_CLUSTER_EOC)) {
+                    return 0;
+                }
+                *out_cluster = cluster_no;
+                return 1;
+            }
+        }
+    }
+    return 0;
+}
+
+/* Walk the chain from `start` and mark every cluster as free.
+ * Safe on already-free or empty chain. */
+static int fat_free_cluster_chain(const FAT32_FS *fs, uint32_t start) {
+    uint32_t cluster = start;
+    uint32_t next;
+    uint32_t safety = 0;
+
+    if (!fs) return 0;
+    if (!fat_is_valid_data_cluster(fs, cluster)) {
+        return 1;
+    }
+
+    while (fat_is_valid_data_cluster(fs, cluster)) {
+        if (!fat_read_fat_entry(fs, cluster, &next)) {
+            return 0;
+        }
+        if (!fat_write_fat_entry(fs, cluster, FAT32_CLUSTER_FREE)) {
+            return 0;
+        }
+        if (fat_is_eoc(next))    break;
+        if (next == cluster)     break;
+        cluster = next;
+        if (++safety > fs->cluster_count) return 0; /* loop guard */
+    }
+    return 1;
+}
+
+/* Write a full cluster (sectors_per_cluster sectors). buf must be
+ * cluster-sized: sectors_per_cluster * bytes_per_sector bytes. */
+static int fat_write_cluster(const FAT32_FS *fs,
+                             uint32_t cluster,
+                             const uint8_t *buf)
+{
+    uint32_t base_lba;
+    uint32_t s;
+
+    if (!fs || !buf) return 0;
+    if (!fat_is_valid_data_cluster(fs, cluster)) return 0;
+
+    base_lba = fat_cluster_to_lba(fs, cluster);
+    for (s = 0; s < fs->sectors_per_cluster; s++) {
+        if (!fat_write_partition_sector(fs, base_lba + s, buf + s * FAT32_SECTOR_SIZE)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* Companion to fat_find_entry_in_directory but returns the on-disk
+ * location of the dirent (sector LBA + offset within the sector)
+ * instead of the parsed entry. Needed for in-place dirent updates. */
+static int fat_locate_dirent_in_directory(const FAT32_FS *fs,
+                                          uint32_t dir_cluster,
+                                          const char *component,
+                                          uint64_t *out_lba,
+                                          uint32_t *out_offset)
+{
+    uint8_t  target_name[11];
+    uint8_t  sector[FAT32_SECTOR_SIZE];
+    uint32_t cluster = dir_cluster;
+    uint32_t next_cluster;
+    uint32_t s, e;
+
+    if (!fs || !component || !out_lba || !out_offset) return 0;
+    if (!fat_component_to_short_name(component, target_name)) return 0;
+
+    while (fat_is_valid_data_cluster(fs, cluster)) {
+        uint32_t base_lba = fat_cluster_to_lba(fs, cluster);
+
+        for (s = 0; s < fs->sectors_per_cluster; s++) {
+            uint64_t sector_lba = base_lba + s;
+            if (!fat_read_partition_sector(fs, sector_lba, sector)) {
+                return 0;
+            }
+            for (e = 0; e < FAT32_SECTOR_SIZE / FAT32_DIRENT_SIZE; e++) {
+                FAT32_RAW_DIRENT *raw =
+                    (FAT32_RAW_DIRENT*)&sector[e * FAT32_DIRENT_SIZE];
+
+                if (raw->name[0] == 0x00) return 0;
+                if (raw->name[0] == 0xE5) continue;
+                if (raw->attr == FAT32_ATTR_LFN) continue;
+                if (raw->attr & FAT32_ATTR_VOLUME_ID) continue;
+
+                if (fat_mem_eq(raw->name, target_name, 11)) {
+                    *out_lba    = sector_lba;
+                    *out_offset = e * FAT32_DIRENT_SIZE;
+                    return 1;
+                }
+            }
+        }
+        if (!fat_read_fat_entry(fs, cluster, &next_cluster)) return 0;
+        if (fat_is_eoc(next_cluster))     break;
+        if (next_cluster == cluster)      return 0;
+        cluster = next_cluster;
+    }
+    return 0;
+}
+
+/* Read sector at `lba`, replace one dirent at `offset`, write sector back. */
+static int fat_write_dirent_at(const FAT32_FS *fs,
+                               uint64_t lba,
+                               uint32_t offset,
+                               const FAT32_RAW_DIRENT *src)
+{
+    uint8_t sector[FAT32_SECTOR_SIZE];
+
+    if (!fs || !src) return 0;
+    if (offset + FAT32_DIRENT_SIZE > FAT32_SECTOR_SIZE) return 0;
+
+    if (!fat_read_partition_sector(fs, lba, sector)) return 0;
+    fat_mem_copy(sector + offset, src, FAT32_DIRENT_SIZE);
+    return fat_write_partition_sector(fs, lba, sector);
+}
+
 static int fat_lookup_path(const FAT32_FS *fs, const char *path, FAT32_DIR_ENTRY *out_entry) {
     char components[FAT32_MAX_PATH_COMPONENTS][FAT32_MAX_COMPONENT_LEN];
     uint32_t component_count = 0;
