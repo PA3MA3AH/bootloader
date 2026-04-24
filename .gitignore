@@ -3,13 +3,31 @@ build/
 *.o
 *.obj
 
-# EFI output
-image/EFI/BOOT/*.EFI
+# logs / debug output
+*.log
+*.tmp
+qemu.log
+qemu-net.pcap
 
 # OVMF vars
 *.fd
 
-# temp
-*.log
-*.tmp
-disk.img
+# disk images
+*.img
+*.raw
+*.qcow2
+
+# mounted dirs
+mnt/
+esp-mnt/
+
+# generated EFI binaries
+image/EFI/BOOT/*.EFI
+image/EFI/COREFORGE/KERNELS/*
+!image/EFI/COREFORGE/KERNELS/.gitkeep
+
+# generated initramfs / linux test files
+*.cpio
+initramfs/
+initramfs*
+init

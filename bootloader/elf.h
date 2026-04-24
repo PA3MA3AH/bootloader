@@ -67,4 +67,11 @@ EFI_STATUS load_kernel_elf_from_path(
     ELF_LOAD_RESULT *result
 );
 
+
+EFI_STATUS load_linux_efi_from_path(
+    EFI_HANDLE image_handle,
+    EFI_SYSTEM_TABLE *st,
+    CHAR16 *kernel_path
+);
+
 #endif

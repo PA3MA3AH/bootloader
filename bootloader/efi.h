@@ -208,6 +208,26 @@ typedef EFI_STATUS (EFIAPI *EFI_WAIT_FOR_EVENT)(
     OUT UINTN *Index
 );
 
+
+typedef EFI_STATUS (EFIAPI *EFI_FREE_POOL)(
+    IN VOID *Buffer
+);
+
+typedef EFI_STATUS (EFIAPI *EFI_IMAGE_LOAD)(
+    IN BOOLEAN BootPolicy,
+    IN EFI_HANDLE ParentImageHandle,
+    IN EFI_DEVICE_PATH_PROTOCOL *DevicePath OPTIONAL,
+    IN VOID *SourceBuffer OPTIONAL,
+    IN UINTN SourceSize,
+    OUT EFI_HANDLE *ImageHandle
+);
+
+typedef EFI_STATUS (EFIAPI *EFI_IMAGE_START)(
+    IN EFI_HANDLE ImageHandle,
+    OUT UINTN *ExitDataSize,
+    OUT CHAR16 **ExitData OPTIONAL
+);
+
 typedef struct {
     EFI_TABLE_HEADER Hdr;
 
@@ -219,7 +239,7 @@ typedef struct {
     EFI_GET_MEMORY_MAP GetMemoryMap;
 
     EFI_ALLOCATE_POOL AllocatePool;
-    VOID *FreePool;
+    EFI_FREE_POOL FreePool;
 
     VOID *CreateEvent;
     VOID *SetTimer;
@@ -238,8 +258,8 @@ typedef struct {
     VOID *LocateDevicePath;
     VOID *InstallConfigurationTable;
 
-    VOID *LoadImage;
-    VOID *StartImage;
+    EFI_IMAGE_LOAD LoadImage;
+    EFI_IMAGE_START StartImage;
     VOID *Exit;
     VOID *UnloadImage;
     EFI_EXIT_BOOT_SERVICES ExitBootServices;
@@ -407,6 +427,11 @@ static EFI_GUID EFI_LOADED_IMAGE_PROTOCOL_GUID = {
 
 static EFI_GUID EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID = {
     0x964e5b22, 0x6459, 0x11d2,
+    {0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B}
+};
+
+static EFI_GUID EFI_DEVICE_PATH_PROTOCOL_GUID = {
+    0x09576e91, 0x6d3f, 0x11d2,
     {0x8E, 0x39, 0x00, 0xA0, 0xC9, 0x69, 0x72, 0x3B}
 };
 

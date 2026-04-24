@@ -164,18 +164,20 @@ disk-clean:
 run: all $(OVMF_VARS_DST) tap-up disk
 	qemu-system-x86_64 \
 		-machine q35 \
-		-m 512M \
+		-m 2048M \
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,format=raw,file=$(OVMF_VARS_DST) \
 		-drive id=disk0,if=none,file=disk.img,format=raw \
 		-device ich9-ahci,id=ahci \
 		-device ide-hd,drive=disk0,bus=ahci.0 \
-		-drive format=raw,file=fat:rw:image \
+		-drive id=esp,if=none,file=esp.img,format=raw \
+		-device ide-hd,drive=esp,bus=ahci.1,bootindex=1 \
 		-netdev tap,id=net0,ifname=tap0,script=no,downscript=no \
 		-device e1000,netdev=net0,mac=52:54:00:12:34:56 \
 		-object filter-dump,id=fd0,netdev=net0,file=qemu-net.pcap \
 		-no-reboot -no-shutdown \
 		-d int,cpu_reset,guest_errors \
+		-serial stdio \
 		-D qemu.log
 
 rebuild: clean all

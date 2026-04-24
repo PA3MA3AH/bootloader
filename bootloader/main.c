@@ -751,7 +751,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
 
     BOOT_CONFIG config;
     UINTN selected = 0;
-    CHAR16 *selected_kernel_path = L"\\EFI\\BOOT\\KERNEL.ELF";
+    CHAR16 *selected_kernel_path = L"\\EFI\\COREFORGE\\KERNELS\\KERNEL.ELF";
     CHAR16 *selected_entry_name = L"Fallback entry";
 
     status = load_config(ImageHandle, SystemTable, &config);
@@ -783,6 +783,27 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     ELF_LOAD_RESULT elf_result;
     memzero(&elf_result, sizeof(ELF_LOAD_RESULT));
 
+    BOOT_ENTRY *selected_entry = 0;
+
+    if (status == EFI_SUCCESS && selected < config.entry_count) {
+        selected_entry = &config.entries[selected];
+    }
+
+    if (selected_entry && selected_entry->type == BOOT_ENTRY_TYPE_LINUX_EFI) {
+        print(SystemTable, L"Loading Linux EFI kernel...\r\n");
+
+        status = load_linux_efi_from_path(
+            ImageHandle,
+            SystemTable,
+            selected_entry->kernel_path
+        );
+
+        print(SystemTable, L"Linux EFI image returned or failed. Status=");
+        print_hex(SystemTable, status);
+        print(SystemTable, L"\r\n");
+        halt_forever();
+    }
+
     status = load_kernel_elf_from_path(
         ImageHandle,
         SystemTable,
@@ -791,6 +812,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
         plan.kernel_reserved_size,
         &elf_result
     );
+
     if (status != EFI_SUCCESS) {
         print(SystemTable, L"Failed to load selected ELF kernel. Status=");
         print_hex(SystemTable, status);
