@@ -8,7 +8,7 @@ KERNEL_CFLAGS   := -target x86_64-unknown-none-elf -ffreestanding -fno-stack-pro
 NASMFLAGS       := -f elf64
 
 EFI_LDFLAGS     := /subsystem:efi_application /entry:efi_main /nodefaultlib /out:image/EFI/BOOT/BOOTX64.EFI
-KERNEL_LDFLAGS  := -nostdlib -static -z max-page-size=0x1000 -T kernel/linker.ld -o image/EFI/BOOT/KERNEL.ELF
+KERNEL_LDFLAGS  := -nostdlib -static -z max-page-size=0x1000 -T kernel/linker.ld -o image/EFI/COREFORGE/KERNELS/KERNEL.ELF
 
 OVMF_CODE       := /usr/share/edk2/x64/OVMF_CODE.4m.fd
 OVMF_VARS_SRC   := /usr/share/edk2/x64/OVMF_VARS.4m.fd
@@ -51,11 +51,11 @@ KERNEL_OBJS := \
 all: build bootloader kernel
 
 build:
-		mkdir -p build image/EFI/BOOT
+		mkdir -p build image/EFI/BOOT image/EFI/COREFORGE image/EFI/COREFORGE/KERNELS image/EFI/COREFORGE/ENTRIES
 
 bootloader: image/EFI/BOOT/BOOTX64.EFI
 
-kernel: image/EFI/BOOT/KERNEL.ELF
+kernel: image/EFI/COREFORGE/KERNELS/KERNEL.ELF
 
 $(OVMF_VARS_DST): | build
 		cp $(OVMF_VARS_SRC) $(OVMF_VARS_DST)
@@ -147,7 +147,7 @@ kernel/partition.o: kernel/partition.c kernel/partition.h kernel/block.h | build
 kernel/fat32.o: kernel/fat32.c kernel/fat32.h kernel/partition.h kernel/console.h | build
 		$(CC) $(KERNEL_CFLAGS) -c kernel/fat32.c -o $@
 
-image/EFI/BOOT/KERNEL.ELF: $(KERNEL_OBJS)
+image/EFI/COREFORGE/KERNELS/KERNEL.ELF: $(KERNEL_OBJS)
 		$(LD_KERNEL) $(KERNEL_LDFLAGS) $(KERNEL_OBJS)
 
 tap-up:
@@ -181,4 +181,4 @@ run: all $(OVMF_VARS_DST) tap-up disk
 rebuild: clean all
 
 clean:
-		rm -rf build qemu.log qemu-net.pcap image/EFI/BOOT/BOOTX64.EFI image/EFI/BOOT/KERNEL.ELF kernel/*.o
+		rm -rf build qemu.log qemu-net.pcap image/EFI/BOOT/BOOTX64.EFI image/EFI/COREFORGE/KERNELS/KERNEL.ELF kernel/*.o

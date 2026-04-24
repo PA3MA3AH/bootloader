@@ -93,6 +93,289 @@ static EFI_STATUS get_file_size(
     return EFI_SUCCESS;
 }
 
+static int ascii_streq(const char *a, const char *b) {
+    UINTN i = 0;
+
+    while (a[i] && b[i]) {
+        if (a[i] != b[i]) {
+            return 0;
+        }
+        i++;
+    }
+
+    return a[i] == 0 && b[i] == 0;
+}
+
+static void char16_copy(CHAR16 *dst, UINTN dst_cap, const CHAR16 *src) {
+    UINTN i = 0;
+
+    if (!dst || dst_cap == 0) {
+        return;
+    }
+
+    if (!src) {
+        dst[0] = 0;
+        return;
+    }
+
+    while (i + 1 < dst_cap && src[i]) {
+        dst[i] = src[i];
+        i++;
+    }
+
+    dst[i] = 0;
+}
+
+static int file_exists(EFI_FILE_PROTOCOL *root, CHAR16 *path) {
+    EFI_FILE_PROTOCOL *file = 0;
+
+    EFI_STATUS status = root->Open(
+        root,
+        &file,
+        path,
+        EFI_FILE_MODE_READ,
+        0
+    );
+
+    if (status != EFI_SUCCESS || !file) {
+        return 0;
+    }
+
+    file->Close(file);
+    return 1;
+}
+
+static void trim_ascii_range(const char *buffer, UINTN *start, UINTN *end) {
+    while (*start < *end && ascii_is_space(buffer[*start])) {
+        (*start)++;
+    }
+
+    while (*end > *start && ascii_is_space(buffer[*end - 1])) {
+        (*end)--;
+    }
+}
+
+static EFI_STATUS parse_single_entry_cfg(
+    EFI_SYSTEM_TABLE *st,
+    EFI_FILE_PROTOCOL *file,
+    BOOT_ENTRY *entry
+) {
+    UINT64 file_size64 = 0;
+    EFI_STATUS status = get_file_size(st, file, &file_size64);
+
+    if (status != EFI_SUCCESS) {
+        return status;
+    }
+
+    if (file_size64 == 0 || file_size64 > 4096) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    UINTN file_size = (UINTN)file_size64;
+    char *buffer = 0;
+
+    status = st->BootServices->AllocatePool(
+        EfiLoaderData,
+        file_size + 1,
+        (VOID**)&buffer
+    );
+
+    if (status != EFI_SUCCESS || !buffer) {
+        return status;
+    }
+
+    UINTN read_size = file_size;
+    status = file->Read(file, &read_size, buffer);
+    if (status != EFI_SUCCESS) {
+        return status;
+    }
+
+    buffer[read_size] = 0;
+
+    entry->type = BOOT_ENTRY_TYPE_ELF;
+    entry->name[0] = 0;
+    entry->kernel_path[0] = 0;
+
+    UINTN i = 0;
+
+    while (i < read_size) {
+        while (i < read_size && ascii_is_space(buffer[i])) {
+            i++;
+        }
+
+        if (i >= read_size) {
+            break;
+        }
+
+        if (buffer[i] == '#') {
+            while (i < read_size && buffer[i] != '\n') {
+                i++;
+            }
+            continue;
+        }
+
+        if (i + 5 <= read_size &&
+            buffer[i+0] == 'n' &&
+            buffer[i+1] == 'a' &&
+            buffer[i+2] == 'm' &&
+            buffer[i+3] == 'e' &&
+            buffer[i+4] == '=') {
+
+            i += 5;
+
+            UINTN start = i;
+            while (i < read_size && buffer[i] != '\r' && buffer[i] != '\n') {
+                i++;
+            }
+            UINTN end = i;
+            trim_ascii_range(buffer, &start, &end);
+
+            if (end > start) {
+                ascii_to_char16(entry->name, 64, &buffer[start], end - start);
+            }
+
+            continue;
+        }
+
+        if (i + 5 <= read_size &&
+            buffer[i+0] == 't' &&
+            buffer[i+1] == 'y' &&
+            buffer[i+2] == 'p' &&
+            buffer[i+3] == 'e' &&
+            buffer[i+4] == '=') {
+
+            i += 5;
+
+            UINTN start = i;
+            while (i < read_size && buffer[i] != '\r' && buffer[i] != '\n') {
+                i++;
+            }
+            UINTN end = i;
+            trim_ascii_range(buffer, &start, &end);
+
+            char type_buf[32];
+            UINTN n = 0;
+            while (start + n < end && n + 1 < sizeof(type_buf)) {
+                type_buf[n] = buffer[start + n];
+                n++;
+            }
+            type_buf[n] = 0;
+
+            if (ascii_streq(type_buf, "elf")) {
+                entry->type = BOOT_ENTRY_TYPE_ELF;
+            } else if (ascii_streq(type_buf, "linux-efi")) {
+                entry->type = BOOT_ENTRY_TYPE_LINUX_EFI;
+            }
+
+            continue;
+        }
+
+        if (i + 7 <= read_size &&
+            buffer[i+0] == 'k' &&
+            buffer[i+1] == 'e' &&
+            buffer[i+2] == 'r' &&
+            buffer[i+3] == 'n' &&
+            buffer[i+4] == 'e' &&
+            buffer[i+5] == 'l' &&
+            buffer[i+6] == '=') {
+
+            i += 7;
+
+            UINTN start = i;
+            while (i < read_size && buffer[i] != '\r' && buffer[i] != '\n') {
+                i++;
+            }
+            UINTN end = i;
+            trim_ascii_range(buffer, &start, &end);
+
+            if (end > start) {
+                ascii_to_char16(entry->kernel_path, 128, &buffer[start], end - start);
+            }
+
+            continue;
+        }
+
+        while (i < read_size && buffer[i] != '\n') {
+            i++;
+        }
+    }
+
+    if (entry->name[0] == 0 || entry->kernel_path[0] == 0) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    return EFI_SUCCESS;
+}
+
+static void add_entry_from_cfg_if_kernel_exists(
+    EFI_SYSTEM_TABLE *st,
+    EFI_FILE_PROTOCOL *root,
+    BOOT_CONFIG *config,
+    CHAR16 *cfg_path
+) {
+    if (config->entry_count >= MAX_ENTRIES) {
+        return;
+    }
+
+    EFI_FILE_PROTOCOL *cfg = 0;
+
+    EFI_STATUS status = root->Open(
+        root,
+        &cfg,
+        cfg_path,
+        EFI_FILE_MODE_READ,
+        0
+    );
+
+    if (status != EFI_SUCCESS || !cfg) {
+        return;
+    }
+
+    BOOT_ENTRY temp;
+    UINT8 *p = (UINT8*)&temp;
+    for (UINTN i = 0; i < sizeof(temp); i++) {
+        p[i] = 0;
+    }
+
+    status = parse_single_entry_cfg(st, cfg, &temp);
+    cfg->Close(cfg);
+
+    if (status != EFI_SUCCESS) {
+        return;
+    }
+
+    if (!file_exists(root, temp.kernel_path)) {
+        return;
+    }
+
+    BOOT_ENTRY *dst = &config->entries[config->entry_count];
+    config->entry_count++;
+
+    dst->type = temp.type;
+    char16_copy(dst->name, 64, temp.name);
+    char16_copy(dst->kernel_path, 128, temp.kernel_path);
+}
+
+static void load_dynamic_entries(
+    EFI_SYSTEM_TABLE *st,
+    EFI_FILE_PROTOCOL *root,
+    BOOT_CONFIG *config
+) {
+    add_entry_from_cfg_if_kernel_exists(
+        st,
+        root,
+        config,
+        L"\\EFI\\COREFORGE\\ENTRIES\\COREFORGE.CFG"
+    );
+
+    add_entry_from_cfg_if_kernel_exists(
+        st,
+        root,
+        config,
+        L"\\EFI\\COREFORGE\\ENTRIES\\LINUX.CFG"
+    );
+}
+
 EFI_STATUS load_config(
     EFI_HANDLE image,
     EFI_SYSTEM_TABLE *st,
@@ -110,15 +393,38 @@ EFI_STATUS load_config(
         return status;
     }
 
+    load_dynamic_entries(st, root, config);
+    
+    if (config->entry_count > 0) {
+        if (config->default_entry >= config->entry_count) {
+            config->default_entry = 0;
+        }
+    
+        return EFI_SUCCESS;
+    }
+
     status = root->Open(
         root,
         &file,
-        L"\\EFI\\BOOT\\BOOT.CFG",
+        L"\\EFI\\COREFORGE\\BOOT.CFG",
         EFI_FILE_MODE_READ,
         0
     );
+    
     if (status != EFI_SUCCESS || !file) {
-        return status;
+        file = 0;
+    
+        status = root->Open(
+            root,
+            &file,
+            L"\\EFI\\BOOT\\BOOT.CFG",
+            EFI_FILE_MODE_READ,
+            0
+        );
+    
+        if (status != EFI_SUCCESS || !file) {
+            return status;
+        }
     }
 
     UINT64 file_size64 = 0;
@@ -241,6 +547,8 @@ EFI_STATUS load_config(
 
             current = &config->entries[config->entry_count];
             config->entry_count++;
+
+            current->type = BOOT_ENTRY_TYPE_ELF;
 
             i++;
 
