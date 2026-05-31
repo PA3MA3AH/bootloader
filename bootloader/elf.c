@@ -2,12 +2,21 @@
 
 static UINTN StrLen(const CHAR16 *s) {
     UINTN i = 0;
-    while (s[i]) i++;
+
+    if (!s) {
+        return 0;
+    }
+
+    while (s[i]) {
+        i++;
+    }
+
     return i;
 }
 
 static void memzero_local(VOID *ptr, UINTN size) {
     UINT8 *p = (UINT8*)ptr;
+
     for (UINTN i = 0; i < size; i++) {
         p[i] = 0;
     }
@@ -16,6 +25,7 @@ static void memzero_local(VOID *ptr, UINTN size) {
 static void memcpy_local(VOID *dst, const VOID *src, UINTN size) {
     UINT8 *d = (UINT8*)dst;
     const UINT8 *s = (const UINT8*)src;
+
     for (UINTN i = 0; i < size; i++) {
         d[i] = s[i];
     }
@@ -30,6 +40,12 @@ static EFI_STATUS open_root_dir(
     EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *fs = 0;
     EFI_FILE_PROTOCOL *root = 0;
 
+    if (!st || !st->BootServices || !out_root) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    *out_root = 0;
+
     EFI_STATUS status = st->BootServices->HandleProtocol(
         image_handle,
         &EFI_LOADED_IMAGE_PROTOCOL_GUID,
@@ -37,7 +53,7 @@ static EFI_STATUS open_root_dir(
     );
 
     if (status != EFI_SUCCESS || !loaded_image) {
-        return status;
+        return status != EFI_SUCCESS ? status : EFI_LOAD_ERROR;
     }
 
     status = st->BootServices->HandleProtocol(
@@ -45,13 +61,14 @@ static EFI_STATUS open_root_dir(
         &EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID,
         (VOID**)&fs
     );
+
     if (status != EFI_SUCCESS || !fs) {
-        return status;
+        return status != EFI_SUCCESS ? status : EFI_LOAD_ERROR;
     }
 
     status = fs->OpenVolume(fs, &root);
     if (status != EFI_SUCCESS || !root) {
-        return status;
+        return status != EFI_SUCCESS ? status : EFI_LOAD_ERROR;
     }
 
     *out_root = root;
@@ -66,6 +83,12 @@ static EFI_STATUS get_file_size(
     UINTN info_size = 0;
     EFI_FILE_INFO *info = 0;
 
+    if (!st || !st->BootServices || !file || !out_file_size) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    *out_file_size = 0;
+
     EFI_STATUS status = file->GetInfo(file, &EFI_FILE_INFO_GUID, &info_size, 0);
     if (status != EFI_BUFFER_TOO_SMALL || info_size == 0) {
         return status;
@@ -73,15 +96,18 @@ static EFI_STATUS get_file_size(
 
     status = st->BootServices->AllocatePool(EfiLoaderData, info_size, (VOID**)&info);
     if (status != EFI_SUCCESS || !info) {
-        return status;
+        return status != EFI_SUCCESS ? status : EFI_OUT_OF_RESOURCES;
     }
 
     status = file->GetInfo(file, &EFI_FILE_INFO_GUID, &info_size, info);
     if (status != EFI_SUCCESS) {
+        st->BootServices->FreePool(info);
         return status;
     }
 
     *out_file_size = info->FileSize;
+    st->BootServices->FreePool(info);
+
     return EFI_SUCCESS;
 }
 
@@ -128,7 +154,7 @@ EFI_STATUS load_kernel_elf_from_path(
     UINT64 reserved_size,
     ELF_LOAD_RESULT *result
 ) {
-    if (!result) {
+    if (!st || !st->BootServices || !kernel_path || !result) {
         return EFI_INVALID_PARAMETER;
     }
 
@@ -141,22 +167,27 @@ EFI_STATUS load_kernel_elf_from_path(
     EFI_FILE_PROTOCOL *kernel = 0;
 
     EFI_STATUS status = open_root_dir(image_handle, st, &root);
-    if (status != EFI_SUCCESS) {
+    if (status != EFI_SUCCESS || !root) {
         return status;
     }
 
     status = root->Open(root, &kernel, kernel_path, EFI_FILE_MODE_READ, 0);
     if (status != EFI_SUCCESS || !kernel) {
-        return status;
+        root->Close(root);
+        return status != EFI_SUCCESS ? status : EFI_NOT_FOUND;
     }
 
     UINT64 file_size64 = 0;
     status = get_file_size(st, kernel, &file_size64);
     if (status != EFI_SUCCESS) {
+        kernel->Close(kernel);
+        root->Close(root);
         return status;
     }
 
     if (file_size64 < sizeof(ELF64_EHDR)) {
+        kernel->Close(kernel);
+        root->Close(root);
         return EFI_LOAD_ERROR;
     }
 
@@ -168,22 +199,32 @@ EFI_STATUS load_kernel_elf_from_path(
         file_size,
         &file_buffer
     );
+
     if (status != EFI_SUCCESS || !file_buffer) {
-        return status;
+        kernel->Close(kernel);
+        root->Close(root);
+        return status != EFI_SUCCESS ? status : EFI_OUT_OF_RESOURCES;
     }
 
     UINTN read_size = file_size;
     status = kernel->Read(kernel, &read_size, file_buffer);
+
+    kernel->Close(kernel);
+    root->Close(root);
+
     if (status != EFI_SUCCESS || read_size != file_size) {
+        st->BootServices->FreePool(file_buffer);
         return EFI_LOAD_ERROR;
     }
 
     ELF64_EHDR *eh = (ELF64_EHDR*)file_buffer;
     if (!validate_elf64(eh)) {
+        st->BootServices->FreePool(file_buffer);
         return EFI_LOAD_ERROR;
     }
 
     if (eh->e_phoff + ((UINT64)eh->e_phnum * sizeof(ELF64_PHDR)) > file_size64) {
+        st->BootServices->FreePool(file_buffer);
         return EFI_LOAD_ERROR;
     }
 
@@ -196,15 +237,12 @@ EFI_STATUS load_kernel_elf_from_path(
     for (UINT16 i = 0; i < eh->e_phnum; i++) {
         ELF64_PHDR *ph = &phdrs[i];
 
-        if (ph->p_type != PT_LOAD) {
-            continue;
-        }
-
-        if (ph->p_memsz == 0) {
+        if (ph->p_type != PT_LOAD || ph->p_memsz == 0) {
             continue;
         }
 
         if (ph->p_offset + ph->p_filesz > file_size64) {
+            st->BootServices->FreePool(file_buffer);
             return EFI_LOAD_ERROR;
         }
 
@@ -220,14 +258,17 @@ EFI_STATUS load_kernel_elf_from_path(
     }
 
     if (segments == 0) {
+        st->BootServices->FreePool(file_buffer);
         return EFI_LOAD_ERROR;
     }
 
-    if (low < reserved_base) {
+    if (low != reserved_base) {
+        st->BootServices->FreePool(file_buffer);
         return EFI_LOAD_ERROR;
     }
 
     if (high > reserved_base + reserved_size) {
+        st->BootServices->FreePool(file_buffer);
         return EFI_BUFFER_TOO_SMALL;
     }
 
@@ -260,8 +301,13 @@ EFI_STATUS load_kernel_elf_from_path(
     result->entry_point = eh->e_entry;
     result->loadable_segments = segments;
 
+    st->BootServices->FreePool(file_buffer);
     return EFI_SUCCESS;
 }
+
+/* --------------------------------------------------------------------------
+ * Linux EFI stub loader
+ * -------------------------------------------------------------------------- */
 
 #define EFI_DP_TYPE_END                 0x7F
 #define EFI_DP_SUBTYPE_END_ENTIRE       0xFF
@@ -287,7 +333,8 @@ static UINTN device_path_node_len(const EFI_DEVICE_PATH_PROTOCOL *node) {
 }
 
 static int device_path_is_end(const EFI_DEVICE_PATH_PROTOCOL *node) {
-    return node->Type == EFI_DP_TYPE_END && node->SubType == EFI_DP_SUBTYPE_END_ENTIRE;
+    return node->Type == EFI_DP_TYPE_END &&
+           node->SubType == EFI_DP_SUBTYPE_END_ENTIRE;
 }
 
 static UINTN device_path_size_with_end(const EFI_DEVICE_PATH_PROTOCOL *path) {
@@ -347,6 +394,7 @@ static EFI_STATUS build_file_device_path(
         &EFI_LOADED_IMAGE_PROTOCOL_GUID,
         (VOID**)&loaded
     );
+
     if (status != EFI_SUCCESS || !loaded) {
         return status != EFI_SUCCESS ? status : EFI_LOAD_ERROR;
     }
@@ -356,6 +404,7 @@ static EFI_STATUS build_file_device_path(
         &EFI_DEVICE_PATH_PROTOCOL_GUID,
         (VOID**)&parent_path
     );
+
     if (status != EFI_SUCCESS || !parent_path) {
         return status != EFI_SUCCESS ? status : EFI_LOAD_ERROR;
     }
@@ -367,7 +416,11 @@ static EFI_STATUS build_file_device_path(
 
     parent_without_end = parent_size - sizeof(EFI_DEVICE_PATH_PROTOCOL);
     path_chars = char16_len_local(kernel_path);
-    file_node_size = sizeof(EFI_DEVICE_PATH_PROTOCOL) + ((path_chars + 1) * sizeof(CHAR16));
+
+    file_node_size =
+        sizeof(EFI_DEVICE_PATH_PROTOCOL) +
+        ((path_chars + 1) * sizeof(CHAR16));
+
     end_node_size = sizeof(EFI_DEVICE_PATH_PROTOCOL);
     total_size = parent_without_end + file_node_size + end_node_size;
 
@@ -450,56 +503,29 @@ EFI_STATUS load_linux_efi_from_path(
     }
 
     EFI_LOADED_IMAGE_PROTOCOL *linux_loaded = 0;
+
     status = st->BootServices->HandleProtocol(
         linux_handle,
         &EFI_LOADED_IMAGE_PROTOCOL_GUID,
         (VOID**)&linux_loaded
     );
-    
+
     if (status != EFI_SUCCESS || !linux_loaded) {
         return status != EFI_SUCCESS ? status : EFI_LOAD_ERROR;
     }
-    
-    /* 👇 ВОТ СЮДА ВСТАВЛЯЕШЬ */
+
+    /*
+     * Current QEMU disk order:
+     *   /dev/sda = disk.img   (FAT32 test disk)
+     *   /dev/sdb = esp.img    (EFI System Partition)
+     *   /dev/sdc = root.img   (Arch ext4 rootfs)
+     */
     static CHAR16 *cmdline =
-    L"console=ttyS0 earlyprintk=ttyS0 loglevel=7 init=/init mem=256M";
-    
+        L"initrd=\\EFI\\COREFORGE\\KERNELS\\initramfs-linux.img root=/dev/sdc rw console=ttyS0 loglevel=7";
+
     linux_loaded->LoadOptions = cmdline;
     linux_loaded->LoadOptionsSize =
         (UINT32)((StrLen(cmdline) + 1) * sizeof(CHAR16));
-
-    EFI_FILE_PROTOCOL *initrd_file = 0;
-    VOID *initrd_buffer = 0;
-    UINTN initrd_size = 0;
-    
-    /* открыть initramfs */
-    status = open_root_dir(image_handle, st, &root);
-    if (status == EFI_SUCCESS) {
-        status = root->Open(root, &initrd_file,
-            L"\\EFI\\COREFORGE\\KERNELS\\initramfs.cpio",
-            EFI_FILE_MODE_READ, 0);
-    }
-    
-    if (status == EFI_SUCCESS && initrd_file) {
-        UINT64 sz = 0;
-        get_file_size(st, initrd_file, &sz);
-    
-        initrd_size = (UINTN)sz;
-    
-        st->BootServices->AllocatePool(EfiLoaderData, initrd_size, &initrd_buffer);
-    
-        UINTN rs = initrd_size;
-        initrd_file->Read(initrd_file, &rs, initrd_buffer);
-    
-        initrd_file->Close(initrd_file);
-    
-        /* передаём Linux */
-        linux_loaded->LoadOptions = cmdline;
-        linux_loaded->LoadOptionsSize =
-            (UINT32)((StrLen(cmdline)+1)*sizeof(CHAR16));
-    
-        linux_loaded->ImageBase = initrd_buffer;
-    }
 
     UINTN exit_data_size = 0;
     CHAR16 *exit_data = 0;
@@ -512,4 +538,3 @@ EFI_STATUS load_linux_efi_from_path(
 
     return status;
 }
-

@@ -12,7 +12,7 @@
 
 #define KERNEL_RESERVED_SIZE    (2ULL * MiB)
 #define BOOTINFO_RESERVED_SIZE  (64ULL * KiB)
-#define SCRATCH_RESERVED_SIZE   (256ULL * KiB)
+#define SCRATCH_RESERVED_SIZE   (1ULL * MiB)
 #define STACK_RESERVED_SIZE     (64ULL * KiB)
 #define CRASHINFO_RESERVED_SIZE (4ULL * KiB)
 
@@ -339,6 +339,8 @@ static int build_memory_layout(
 
     UINTN entry_count = memory_map_size / descriptor_size;
 
+#define KERNEL_LINK_ADDRESS 0x0000000001800000ULL
+
     EFI_PHYSICAL_ADDRESS best_base = 0;
     UINT64 best_size = 0;
 
@@ -350,14 +352,20 @@ static int build_memory_layout(
             continue;
         }
 
-        UINT64 region_size = desc->NumberOfPages * PAGE_SIZE;
+        UINT64 region_start = desc->PhysicalStart;
+        UINT64 region_end = region_start + desc->NumberOfPages * PAGE_SIZE;
 
         plan->usable_regions++;
-        plan->total_usable_bytes += region_size;
+        plan->total_usable_bytes += (desc->NumberOfPages * PAGE_SIZE);
 
+        if (KERNEL_LINK_ADDRESS < region_start || KERNEL_LINK_ADDRESS >= region_end) {
+            continue;
+        }
+
+        UINT64 region_size = region_end - region_start;
         if (region_size > best_size) {
             best_size = region_size;
-            best_base = desc->PhysicalStart;
+            best_base = region_start;
         }
     }
 
@@ -371,7 +379,7 @@ static int build_memory_layout(
     UINT64 region_start = best_base;
     UINT64 region_end = best_base + best_size;
 
-    UINT64 kernel_base = align_up(region_start, 2ULL * MiB);
+    UINT64 kernel_base = KERNEL_LINK_ADDRESS;
     UINT64 kernel_end = kernel_base + KERNEL_RESERVED_SIZE;
 
     UINT64 bootinfo_base = align_up(kernel_end, PAGE_SIZE);
