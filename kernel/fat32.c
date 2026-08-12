@@ -1055,6 +1055,17 @@ int fat32_list_directory(CONSOLE *con, PARTITION_INFO *part, const char *path) {
     return 1;
 }
 
+/* Public wrapper: read file into kmalloc'd buffer. Caller must kfree. */
+int fat32_read_file(PARTITION_INFO *part, const char *path, uint8_t **out_buf, uint32_t *out_size) {
+    FAT32_FS fs;
+    FAT32_DIR_ENTRY file;
+
+    if (!part || !path || !out_buf || !out_size) return 0;
+
+    if (!fat32_mount(part, &fs)) return 0;
+    if (!fat_lookup_path(&fs, path, &file) || file.is_dir) return 0;
+    return fat_read_file_into_buffer(&fs, &file, out_buf, out_size);
+}
 
 int fat32_cat_file(CONSOLE *con, PARTITION_INFO *part, const char *path) {
     FAT32_FS fs;

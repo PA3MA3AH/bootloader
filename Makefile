@@ -18,7 +18,8 @@ BOOT_OBJS := \
 		build/main.obj \
 		build/config.obj \
 		build/menu.obj \
-		build/elf.obj
+		build/elf.obj \
+		build/chkstk.obj
 
 KERNEL_OBJS := \
 		kernel/kernel.o \
@@ -27,6 +28,8 @@ KERNEL_OBJS := \
 		kernel/memory_map.o \
 		kernel/pmm.o \
 		kernel/vmm.o \
+		kernel/gdt.o \
+		kernel/gdt_asm.o \
 		kernel/idt.o \
 		kernel/interrupts.o \
 		kernel/keyboard.o \
@@ -44,7 +47,20 @@ KERNEL_OBJS := \
 		kernel/ahci.o \
 		kernel/block.o \
 		kernel/partition.o \
-		kernel/fat32.o
+		kernel/fat32.o \
+		kernel/vfs.o \
+		kernel/vfs_fat32.o \
+		kernel/task.o \
+		kernel/task_switch.o \
+		kernel/sched.o \
+		kernel/syscall.o \
+		kernel/acpi.o \
+		kernel/tcc_wrap.o \
+		kernel/tcc_shell.o \
+		kernel/tcc/tcc.o \
+		kernel/tcc/tcc_libc.o \
+		kernel/cfe.o \
+		kernel/cfe_config.o
 
 .PHONY: all build bootloader kernel run clean rebuild tap-up disk disk-rebuild disk-clean
 
@@ -72,6 +88,9 @@ build/menu.obj: bootloader/menu.c bootloader/menu.h bootloader/config.h bootload
 build/elf.obj: bootloader/elf.c bootloader/elf.h bootloader/efi.h | build
 		$(CC) $(BOOT_CFLAGS) -c bootloader/elf.c -o $@
 
+build/chkstk.obj: bootloader/chkstk.c | build
+		$(CC) $(BOOT_CFLAGS) -c bootloader/chkstk.c -o $@
+
 image/EFI/BOOT/BOOTX64.EFI: $(BOOT_OBJS)
 		$(LD_EFI) $(EFI_LDFLAGS) $(BOOT_OBJS)
 
@@ -91,10 +110,16 @@ kernel/pmm.o: kernel/pmm.c | build
 		$(CC) $(KERNEL_CFLAGS) -c kernel/pmm.c -o $@
 
 kernel/vmm.o: kernel/vmm.c kernel/vmm.h | build
-		$(CC) $(KERNEL_CFLAGS) -c kernel/vmm.c -o $@
+	$(CC) $(KERNEL_CFLAGS) -c kernel/vmm.c -o $@
+
+kernel/gdt.o: kernel/gdt.c kernel/gdt.h | build
+	$(CC) $(KERNEL_CFLAGS) -c kernel/gdt.c -o $@
+
+kernel/gdt_asm.o: kernel/gdt_asm.asm | build
+	$(NASM) $(NASMFLAGS) kernel/gdt_asm.asm -o $@
 
 kernel/idt.o: kernel/idt.c | build
-		$(CC) $(KERNEL_CFLAGS) -c kernel/idt.c -o $@
+	$(CC) $(KERNEL_CFLAGS) -c kernel/idt.c -o $@
 
 kernel/interrupts.o: kernel/interrupts.c | build
 		$(CC) $(KERNEL_CFLAGS) -c kernel/interrupts.c -o $@
@@ -147,6 +172,45 @@ kernel/partition.o: kernel/partition.c kernel/partition.h kernel/block.h | build
 kernel/fat32.o: kernel/fat32.c kernel/fat32.h kernel/partition.h kernel/console.h | build
 		$(CC) $(KERNEL_CFLAGS) -c kernel/fat32.c -o $@
 
+kernel/vfs.o: kernel/vfs.c kernel/vfs.h | build
+		$(CC) $(KERNEL_CFLAGS) -c kernel/vfs.c -o $@
+
+kernel/vfs_fat32.o: kernel/vfs_fat32.c kernel/vfs.h kernel/fat32.h | build
+		$(CC) $(KERNEL_CFLAGS) -c kernel/vfs_fat32.c -o $@
+
+kernel/task.o: kernel/task.c kernel/task.h | build
+		$(CC) $(KERNEL_CFLAGS) -c kernel/task.c -o $@
+
+kernel/task_switch.o: kernel/task_switch.asm | build
+		$(NASM) $(NASMFLAGS) kernel/task_switch.asm -o $@
+
+kernel/sched.o: kernel/sched.c kernel/sched.h kernel/task.h | build
+		$(CC) $(KERNEL_CFLAGS) -c kernel/sched.c -o $@
+
+kernel/syscall.o: kernel/syscall.c kernel/syscall.h kernel/task.h | build
+		$(CC) $(KERNEL_CFLAGS) -c kernel/syscall.c -o $@
+
+kernel/acpi.o: kernel/acpi.c kernel/acpi.h | build
+		$(CC) $(KERNEL_CFLAGS) -c kernel/acpi.c -o $@
+
+kernel/tcc_wrap.o: kernel/tcc_wrap.c kernel/tcc/config.h kernel/tcc/libtcc.h | build
+		$(CC) $(KERNEL_CFLAGS) -Ikernel/tcc -c kernel/tcc_wrap.c -o $@
+
+kernel/tcc_shell.o: kernel/tcc_shell.c kernel/shell.h | build
+		$(CC) $(KERNEL_CFLAGS) -Ikernel/tcc -c kernel/tcc_shell.c -o $@
+
+kernel/tcc/tcc.o: kernel/tcc/tcc.c kernel/tcc/tcc.h kernel/tcc/libtcc.h kernel/tcc/config.h kernel/tcc/tccdefs_.h | build
+		$(CC) $(KERNEL_CFLAGS) -Ikernel/tcc -fcommon -w -DTCC_VERSION=\"0.9.27\" -c kernel/tcc/tcc.c -o $@
+
+kernel/tcc/tcc_libc.o: kernel/tcc/tcc_libc.c kernel/tcc/tcclib.h | build
+		$(CC) $(KERNEL_CFLAGS) -Ikernel/tcc -c kernel/tcc/tcc_libc.c -o $@
+
+kernel/cfe.o: kernel/cfe.c kernel/cfe.h | build
+		$(CC) $(KERNEL_CFLAGS) -c kernel/cfe.c -o $@
+
+kernel/cfe_config.o: kernel/cfe_config.c kernel/cfe.h | build
+		$(CC) $(KERNEL_CFLAGS) -c kernel/cfe_config.c -o $@
+
 image/EFI/COREFORGE/KERNELS/KERNEL.ELF: $(KERNEL_OBJS)
 		$(LD_KERNEL) $(KERNEL_LDFLAGS) $(KERNEL_OBJS)
 
@@ -164,7 +228,7 @@ disk-clean:
 run: all $(OVMF_VARS_DST) tap-up disk
 	qemu-system-x86_64 \
 		-machine q35 \
-		-m 2048M \
+		-m 8192M \
 		-drive if=pflash,format=raw,readonly=on,file=$(OVMF_CODE) \
 		-drive if=pflash,format=raw,file=$(OVMF_VARS_DST) \
 		-drive id=disk0,if=none,file=disk.img,format=raw \
@@ -173,11 +237,16 @@ run: all $(OVMF_VARS_DST) tap-up disk
 		-drive id=esp,if=none,file=esp.img,format=raw \
 		-device ide-hd,drive=esp,bus=ahci.1,bootindex=1 \
 		-netdev tap,id=net0,ifname=tap0,script=no,downscript=no \
-		-device e1000,netdev=net0,mac=52:54:00:12:34:56 \
+		-device e1000e,netdev=net0,mac=52:54:00:12:34:56 \
 		-object filter-dump,id=fd0,netdev=net0,file=qemu-net.pcap \
 		-no-reboot -no-shutdown \
 		-d int,cpu_reset,guest_errors \
 		-serial stdio \
+		-drive id=rootfs,if=none,file=root.img,format=raw \
+		-device ide-hd,drive=rootfs,bus=ahci.2 \
+		-enable-kvm \
+		-cpu host \
+		-smp 8
 		-D qemu.log
 
 rebuild: clean all

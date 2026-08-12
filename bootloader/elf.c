@@ -538,3 +538,84 @@ EFI_STATUS load_linux_efi_from_path(
 
     return status;
 }
+
+/* --------------------------------------------------------------------------
+ * Initrd / initramfs loader
+ * -------------------------------------------------------------------------- */
+
+EFI_STATUS load_initrd_from_path(
+    EFI_HANDLE image_handle,
+    EFI_SYSTEM_TABLE *st,
+    CHAR16 *initrd_path,
+    INITRD_LOAD_RESULT *result
+) {
+    if (!st || !st->BootServices || !initrd_path || !result) {
+        return EFI_INVALID_PARAMETER;
+    }
+
+    result->phys_base = 0;
+    result->size = 0;
+
+    if (initrd_path[0] == 0) {
+        return EFI_NOT_FOUND;
+    }
+
+    EFI_FILE_PROTOCOL *root = 0;
+    EFI_FILE_PROTOCOL *file = 0;
+
+    EFI_STATUS status = open_root_dir(image_handle, st, &root);
+    if (status != EFI_SUCCESS || !root) {
+        return status;
+    }
+
+    status = root->Open(root, &file, initrd_path, EFI_FILE_MODE_READ, 0);
+    if (status != EFI_SUCCESS || !file) {
+        root->Close(root);
+        return status != EFI_SUCCESS ? status : EFI_NOT_FOUND;
+    }
+
+    UINT64 file_size64 = 0;
+    status = get_file_size(st, file, &file_size64);
+    if (status != EFI_SUCCESS) {
+        file->Close(file);
+        root->Close(root);
+        return status;
+    }
+
+    if (file_size64 == 0) {
+        file->Close(file);
+        root->Close(root);
+        return EFI_LOAD_ERROR;
+    }
+
+    UINTN page_count = (UINTN)((file_size64 + 0xFFF) / 0x1000);
+    EFI_PHYSICAL_ADDRESS phys = 0;
+
+    status = st->BootServices->AllocatePages(
+        AllocateAnyPages,
+        EfiLoaderData,
+        page_count,
+        &phys
+    );
+
+    if (status != EFI_SUCCESS) {
+        file->Close(file);
+        root->Close(root);
+        return status;
+    }
+
+    UINTN read_size = (UINTN)file_size64;
+    status = file->Read(file, &read_size, (VOID*)(UINTN)phys);
+
+    file->Close(file);
+    root->Close(root);
+
+    if (status != EFI_SUCCESS || read_size != (UINTN)file_size64) {
+        return EFI_LOAD_ERROR;
+    }
+
+    result->phys_base = phys;
+    result->size = file_size64;
+
+    return EFI_SUCCESS;
+}

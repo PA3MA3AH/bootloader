@@ -58,6 +58,11 @@ typedef struct {
     UINT64 loadable_segments;
 } ELF_LOAD_RESULT;
 
+typedef struct {
+    EFI_PHYSICAL_ADDRESS phys_base;
+    UINT64 size;
+} INITRD_LOAD_RESULT;
+
 EFI_STATUS load_kernel_elf_from_path(
     EFI_HANDLE image_handle,
     EFI_SYSTEM_TABLE *st,
@@ -72,6 +77,13 @@ EFI_STATUS load_linux_efi_from_path(
     EFI_HANDLE image_handle,
     EFI_SYSTEM_TABLE *st,
     CHAR16 *kernel_path
+);
+
+EFI_STATUS load_initrd_from_path(
+    EFI_HANDLE image_handle,
+    EFI_SYSTEM_TABLE *st,
+    CHAR16 *initrd_path,
+    INITRD_LOAD_RESULT *result
 );
 
 #endif

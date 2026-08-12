@@ -14,12 +14,21 @@
 #include "block.h"
 #include "partition.h"
 #include "io.h"
+#include "acpi.h"
+#include "vfs.h"
+#include "task.h"
+#include "sched.h"
+#include "syscall.h"
+#include "gdt.h"
+
+/* TCC in-kernel compiler */
+extern int tcc_kernel_init(CONSOLE *con);
 
 #define KERNEL_PIT_HZ 100
 
 static void kernel_print_banner(CONSOLE *con) {
     console_printf(con, "========================================\n");
-    console_printf(con, "MyOS kernel started\n");
+    console_printf(con, "CFOS kernel started\n");
     console_printf(con, "Early kernel initialization\n");
     console_printf(con, "========================================\n\n");
 }
@@ -65,6 +74,12 @@ static void kernel_print_boot_info(CONSOLE *con, BOOT_INFO *boot_info) {
                    (void*)(uintptr_t)boot_info->crash_info_phys);
     console_printf(con, "  crash info size:          %u\n",
                    (unsigned int)boot_info->crash_info_size);
+    console_printf(con, "  ACPI RSDP address:        %p\n",
+                   (void*)(uintptr_t)boot_info->acpi_rsdp_address);
+    console_printf(con, "  initrd phys address:      %p\n",
+                   (void*)(uintptr_t)boot_info->initrd_phys);
+    console_printf(con, "  initrd size:              %u\n",
+                   (unsigned int)boot_info->initrd_size);
     console_printf(con, "  memory map:               %p\n",
                    (void*)(uintptr_t)boot_info->memory_map);
     console_printf(con, "  memory map size:          %u\n",
@@ -82,7 +97,11 @@ static void kernel_print_runtime_plan(CONSOLE *con) {
     console_printf(con, "  external IRQs:            IRQ1 keyboard enabled, IRQ0 optional\n");
     console_printf(con, "  keyboard input:           IRQ1 + ring buffer\n");
     console_printf(con, "  PIT timer:                prepared but not enabled\n");
-    console_printf(con, "  kernel heap:              enabled (kmalloc/kfree)\n\n");
+    console_printf(con, "  kernel heap:              enabled (kmalloc/kfree)\n");
+    console_printf(con, "  ACPI:                     enabled\n");
+    console_printf(con, "  VFS:                      enabled\n");
+    console_printf(con, "  tasks/scheduler:          enabled\n");
+    console_printf(con, "  syscalls:                 enabled\n\n");
 }
 
 static void kernel_validate_boot_info(BOOT_INFO *boot_info) {
@@ -176,6 +195,9 @@ static void kernel_init_interrupt_core(CONSOLE *con) {
 
     console_printf(con, "[1/5] Interrupt core init...\n");
 
+    gdt_init();
+    console_printf(con, "      GDT loaded.\n");
+
     interrupts_disable();
     interrupts_set_console(con);
     interrupts_init();
@@ -235,7 +257,7 @@ static void kernel_init_storage(CONSOLE *con) {
 
     panic_set_stage("storage init");
 
-    console_printf(con, "[4/6] Storage init...\n");
+    console_printf(con, "[4/10] Storage init...\n");
 
     block_init();
     console_printf(con, "      Block layer initialized.\n");
@@ -271,7 +293,7 @@ static void kernel_init_storage(CONSOLE *con) {
 static void kernel_init_input(CONSOLE *con) {
     panic_set_stage("input subsystem init");
 
-    console_printf(con, "[5/6] Input subsystem init...\n");
+    console_printf(con, "[5/10] Input subsystem init...\n");
 
     keyboard_init();
 
@@ -281,16 +303,104 @@ static void kernel_init_input(CONSOLE *con) {
     console_printf(con, "      PS/2 keyboard ready (IRQ1 + ring buffer).\n\n");
 }
 
+static void kernel_init_acpi(CONSOLE *con, BOOT_INFO *boot_info) {
+    panic_set_stage("ACPI init");
+
+    console_printf(con, "[6/10] ACPI init...\n");
+
+    if (boot_info->acpi_rsdp_address == 0) {
+        console_printf(con, "      No ACPI RSDP provided by bootloader.\n\n");
+        return;
+    }
+
+    acpi_init(boot_info->acpi_rsdp_address);
+
+    if (!acpi_is_initialized()) {
+        console_printf(con, "      ACPI initialization failed.\n\n");
+        return;
+    }
+
+    acpi_print_info(con);
+    console_printf(con, "      CPU count: %u\n", acpi_get_cpu_count());
+    console_printf(con, "      Local APIC address: 0x%p\n\n", (void*)acpi_get_local_apic_address());
+}
+
+static void kernel_init_vfs(CONSOLE *con) {
+    panic_set_stage("VFS init");
+
+    console_printf(con, "[7/10] VFS init...\n");
+
+    vfs_init();
+
+    if (!vfs_is_initialized()) {
+        console_printf(con, "      VFS initialization failed.\n\n");
+        return;
+    }
+
+    console_printf(con, "      VFS layer ready.\n\n");
+}
+
+static void kernel_init_tasks(CONSOLE *con) {
+    panic_set_stage("task subsystem init");
+
+    console_printf(con, "[8/10] Task subsystem init...\n");
+
+    task_init();
+
+    if (!task_is_initialized()) {
+        console_printf(con, "      Task initialization failed.\n\n");
+        return;
+    }
+
+    sched_init();
+
+    if (!sched_is_initialized()) {
+        console_printf(con, "      Scheduler initialization failed.\n\n");
+        return;
+    }
+
+    console_printf(con, "      Task subsystem and scheduler ready.\n\n");
+}
+
+static void kernel_init_syscalls(CONSOLE *con) {
+    panic_set_stage("syscall init");
+
+    console_printf(con, "[9/10] Syscall subsystem init...\n");
+
+    syscall_init();
+
+    if (!syscall_is_initialized()) {
+        console_printf(con, "      Syscall initialization failed.\n\n");
+        return;
+    }
+
+    console_printf(con, "      Syscall subsystem ready.\n\n");
+}
+
 static void kernel_init_shell(CONSOLE *con,
                               BOOT_INFO *boot_info,
                               SHELL *sh) {
     panic_set_stage("shell init");
 
-    console_printf(con, "[6/6] Shell init...\n");
+    console_printf(con, "[10/11] Shell init...\n");
 
     shell_init(sh, con, boot_info);
 
     console_printf(con, "      Mini shell ready.\n\n");
+}
+
+static void kernel_init_tcc(CONSOLE *con) {
+    panic_set_stage("TCC compiler init");
+
+    console_printf(con, "[11/11] TCC compiler init...\n");
+    console_printf(con, "      >>> ENTERING tcc_kernel_init <<<\n");
+
+    if (tcc_kernel_init(con) != 0) {
+        console_printf(con, "      WARNING: TCC init failed\n\n");
+        return;
+    }
+
+    console_printf(con, "      TCC x86_64 compiler ready.\n\n");
 }
 
 static void kernel_prepare_timer(CONSOLE *con) {
@@ -398,7 +508,12 @@ void kernel_main(BOOT_INFO *boot_info) {
     kernel_init_heap(&con, boot_info);
     kernel_init_storage(&con);
     kernel_init_input(&con);
+    kernel_init_acpi(&con, boot_info);
+    kernel_init_vfs(&con);
+    kernel_init_tasks(&con);
+    kernel_init_syscalls(&con);
     kernel_init_shell(&con, boot_info, &sh);
+    kernel_init_tcc(&con);
     kernel_prepare_timer(&con);
 
     if (kernel_should_enter_debug_shell(&con)) {

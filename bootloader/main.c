@@ -451,6 +451,37 @@ static EFI_STATUS get_gop_info(
     return EFI_SUCCESS;
 }
 
+static int guid_equal(EFI_GUID *a, EFI_GUID *b) {
+    if (a->Data1 != b->Data1 || a->Data2 != b->Data2 || a->Data3 != b->Data3) {
+        return 0;
+    }
+
+    for (int i = 0; i < 8; i++) {
+        if (a->Data4[i] != b->Data4[i]) {
+            return 0;
+        }
+    }
+
+    return 1;
+}
+
+static UINT64 find_acpi_rsdp(EFI_SYSTEM_TABLE *st) {
+    UINT64 rsdp10 = 0;
+    UINT64 rsdp20 = 0;
+
+    for (UINTN i = 0; i < st->NumberOfTableEntries; i++) {
+        EFI_CONFIGURATION_TABLE *entry = &st->ConfigurationTable[i];
+
+        if (guid_equal(&entry->VendorGuid, &EFI_ACPI_20_TABLE_GUID)) {
+            rsdp20 = (UINT64)(UINTN)entry->VendorTable;
+        } else if (guid_equal(&entry->VendorGuid, &EFI_ACPI_10_TABLE_GUID)) {
+            rsdp10 = (UINT64)(UINTN)entry->VendorTable;
+        }
+    }
+
+    return rsdp20 != 0 ? rsdp20 : rsdp10;
+}
+
 static void print_memory_map_table(
     EFI_SYSTEM_TABLE *st,
     EFI_MEMORY_DESCRIPTOR *memory_map,
@@ -583,7 +614,7 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     SystemTable->ConOut->Reset(SystemTable->ConOut, 1);
     SystemTable->ConOut->ClearScreen(SystemTable->ConOut);
 
-    print(SystemTable, L"MyOS bootloader\r\n");
+    print(SystemTable, L"CFOS bootloader\r\n");
     print(SystemTable, L"UEFI loader + boot.cfg + ELF kernel + jump to entry\r\n\r\n");
 
     UINTN memory_map_capacity = 0;
@@ -853,6 +884,36 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     print_dec(SystemTable, elf_result.loadable_segments);
     print(SystemTable, L"\r\n\r\n");
 
+    INITRD_LOAD_RESULT initrd_result;
+    memzero(&initrd_result, sizeof(INITRD_LOAD_RESULT));
+
+    if (selected_entry && selected_entry->initrd_path[0] != 0) {
+        print(SystemTable, L"Loading initrd: ");
+        print(SystemTable, selected_entry->initrd_path);
+        print(SystemTable, L"\r\n");
+
+        status = load_initrd_from_path(
+            ImageHandle,
+            SystemTable,
+            selected_entry->initrd_path,
+            &initrd_result
+        );
+
+        if (status != EFI_SUCCESS) {
+            print(SystemTable, L"  WARNING: initrd load failed. Status=");
+            print_hex(SystemTable, status);
+            print(SystemTable, L"\r\n\r\n");
+            initrd_result.phys_base = 0;
+            initrd_result.size = 0;
+        } else {
+            print(SystemTable, L"  initrd base: ");
+            print_hex(SystemTable, initrd_result.phys_base);
+            print(SystemTable, L"  size: ");
+            print_dec(SystemTable, initrd_result.size);
+            print(SystemTable, L"\r\n\r\n");
+        }
+    }
+
     BOOT_INFO *boot_info = (BOOT_INFO*)(UINTN)plan.bootinfo_phys;
     memzero(boot_info, sizeof(BOOT_INFO));
 
@@ -872,6 +933,15 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     boot_info->heap_size = plan.future_heap_size;
     boot_info->crash_info_phys = plan.crash_info_phys;
     boot_info->crash_info_size = plan.crash_info_reserved_size;
+
+    boot_info->initrd_phys = initrd_result.phys_base;
+    boot_info->initrd_size = initrd_result.size;
+
+    boot_info->acpi_rsdp_address = find_acpi_rsdp(SystemTable);
+
+    print(SystemTable, L"ACPI RSDP:       ");
+    print_hex(SystemTable, boot_info->acpi_rsdp_address);
+    print(SystemTable, L"\r\n");
 
     status = get_gop_info(SystemTable, boot_info);
     if (status != EFI_SUCCESS) {

@@ -39,6 +39,11 @@ typedef struct {
     uint32_t framebuffer_height;
     uint32_t framebuffer_pixels_per_scanline;
     uint32_t framebuffer_format;
+
+    uint64_t acpi_rsdp_address;
+
+    uint64_t initrd_phys;
+    uint64_t initrd_size;
 } BOOT_INFO;
 
 #endif

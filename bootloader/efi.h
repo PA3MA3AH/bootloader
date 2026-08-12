@@ -287,6 +287,11 @@ typedef struct {
 } EFI_BOOT_SERVICES;
 
 typedef struct {
+    EFI_GUID VendorGuid;
+    VOID *VendorTable;
+} EFI_CONFIGURATION_TABLE;
+
+typedef struct {
     EFI_TABLE_HEADER Hdr;
     CHAR16 *FirmwareVendor;
     UINT32 FirmwareRevision;
@@ -299,7 +304,7 @@ typedef struct {
     VOID *RuntimeServices;
     EFI_BOOT_SERVICES *BootServices;
     UINTN NumberOfTableEntries;
-    VOID *ConfigurationTable;
+    EFI_CONFIGURATION_TABLE *ConfigurationTable;
 } EFI_SYSTEM_TABLE;
 
 struct EFI_DEVICE_PATH_PROTOCOL {
@@ -443,6 +448,16 @@ static EFI_GUID EFI_FILE_INFO_GUID = {
 static EFI_GUID EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID = {
     0x9042a9de, 0x23dc, 0x4a38,
     {0x96, 0xfb, 0x7a, 0xde, 0xd0, 0x80, 0x51, 0x6a}
+};
+
+static EFI_GUID EFI_ACPI_20_TABLE_GUID = {
+    0x8868e871, 0xe4f1, 0x11d3,
+    {0xbc, 0x22, 0x00, 0x80, 0xc7, 0x3c, 0x88, 0x81}
+};
+
+static EFI_GUID EFI_ACPI_10_TABLE_GUID = {
+    0xeb9d2d30, 0x2d88, 0x11d3,
+    {0x9a, 0x16, 0x00, 0x90, 0x27, 0x3f, 0xc1, 0x4d}
 };
 
 #endif

@@ -53,6 +53,8 @@ void fat32_print_info(CONSOLE *con, const FAT32_FS *fs);
 
 int fat32_list_directory(CONSOLE *con, PARTITION_INFO *part, const char *path);
 int fat32_cat_file(CONSOLE *con, PARTITION_INFO *part, const char *path);
+/* Read file into kmalloc'd buffer. Caller must kfree. Returns 1 on success. */
+int fat32_read_file(PARTITION_INFO *part, const char *path, uint8_t **out_buf, uint32_t *out_size);
 int fat32_stat_path(CONSOLE *con, PARTITION_INFO *part, const char *path);
 int fat32_view_file(CONSOLE *con, PARTITION_INFO *part, const char *path, uint32_t page_lines);
 int fat32_dump_file(CONSOLE *con, PARTITION_INFO *part, const char *path, uint32_t max_bytes);

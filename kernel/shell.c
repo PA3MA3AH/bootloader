@@ -12,11 +12,15 @@
 #include "block.h"
 #include "partition.h"
 #include "fat32.h"
+#include "cfe.h"
 
 #define SHELL_PIT_HZ 100
 #define SHELL_HISTORY_MAX 16
+#define SHELL_CWD_MAX 128
 
 static int g_pit_enabled = 0;
+static char g_cwd[SHELL_CWD_MAX] = "/";       /* working dir within current partition */
+static PARTITION_INFO *g_cwd_part = NULL;      /* current partition */
 
 static char g_history[SHELL_HISTORY_MAX][SHELL_INPUT_MAX];
 static uint32_t g_history_count = 0;
@@ -319,61 +323,78 @@ static void shell_history_down(SHELL *sh) {
 }
 
 static void shell_print_help(SHELL *sh) {
-    console_printf(sh->con, "Commands:\n");
+    console_printf(sh->con, "General:\n");
     console_printf(sh->con, "  help              - show this help\n");
     console_printf(sh->con, "  clear             - clear screen\n");
+    console_printf(sh->con, "  echo ...          - print text\n");
+    console_printf(sh->con, "  panic             - trigger kernel panic\n");
+    console_printf(sh->con, "  halt              - stop CPU\n");
+    console_printf(sh->con, "  reboot            - reboot machine\n");
+    console_printf(sh->con, "Memory:\n");
     console_printf(sh->con, "  mem               - show boot memory info\n");
     console_printf(sh->con, "  pmm               - show PMM info\n");
     console_printf(sh->con, "  alloc             - allocate and test one physical page\n");
     console_printf(sh->con, "  pf                - trigger a page fault for testing\n");
     console_printf(sh->con, "  kmem              - show kernel heap stats\n");
     console_printf(sh->con, "  ktest             - basic kmalloc/kfree test\n");
+    console_printf(sh->con, "PCI & SATA:\n");
     console_printf(sh->con, "  pci               - scan PCI bus and print devices\n");
     console_printf(sh->con, "  pcidump b d f     - dump one PCI device config summary\n");
-    console_printf(sh->con, "  fatinfo <part>   - show FAT32 info for a partition\n");
     console_printf(sh->con, "  ahci              - probe/init AHCI SATA controller\n");
     console_printf(sh->con, "  ahciports         - list AHCI ports and attached devices\n");
     console_printf(sh->con, "  ahciid <port>     - IDENTIFY DEVICE on one SATA port\n");
     console_printf(sh->con, "  readlba p lba n   - read 1..8 sectors from SATA disk\n");
+    console_printf(sh->con, "Block devices:\n");
     console_printf(sh->con, "  blk               - list generic block devices\n");
     console_printf(sh->con, "  blkid <dev>       - show block device info by index or name\n");
     console_printf(sh->con, "  blkread d lba n   - read 1..8 sectors via block layer\n");
+    console_printf(sh->con, "Partitions:\n");
     console_printf(sh->con, "  part              - list detected partitions\n");
     console_printf(sh->con, "  partscan          - rescan partitions on all disks\n");
     console_printf(sh->con, "  partinfo <part>   - show partition info by index or name\n");
+    console_printf(sh->con, "FAT32 filesystem:\n");
+    console_printf(sh->con, "  cd <part> [path]  - change directory / set current partition\n");
+    console_printf(sh->con, "  ls [path]         - list directory on current partition\n");
+    console_printf(sh->con, "  cat <file>        - print file contents\n");
+    console_printf(sh->con, "  cp <src> <dst>    - copy file on current partition\n");
+    console_printf(sh->con, "  mv <old> <new>    - rename file on current partition\n");
+    console_printf(sh->con, "  rm <file>         - delete file on current partition\n");
+    console_printf(sh->con, "  touch <file>      - create empty file\n");
+    console_printf(sh->con, "  pwd               - show current partition and directory\n");
+    console_printf(sh->con, "  fatinfo <part>    - show FAT32 info for a partition\n");
     console_printf(sh->con, "  fatls <part> [p]  - list FAT32 directory (8.3 names)\n");
     console_printf(sh->con, "  fatcat <part> <p> - quick text preview for small files\n");
     console_printf(sh->con, "  fatwrite <part> <p> <text> - overwrite existing file\n");
     console_printf(sh->con, "  fatrename <part> <old> <new> - rename within same dir\n");
     console_printf(sh->con, "  fattouch <part> <p>  - create empty file\n");
     console_printf(sh->con, "  fatrm <part> <p>     - delete file\n");
-    console_printf(sh->con, "  fatview <part> <p>- paged file viewer with line numbers\n");
-    console_printf(sh->con, "  fatdump <part> <p>- hex dump first bytes of a file\n");
-    console_printf(sh->con, "  fatstat <part> <p>- show FAT32 entry info\n");
-    console_printf(sh->con, "  e1000             - probe and init Intel e1000/e1000e device\n");
+    console_printf(sh->con, "  fatview [-N] <part> <p> - paged file viewer\n");
+    console_printf(sh->con, "  fatdump <part> <p> - hex dump first bytes of a file\n");
+    console_printf(sh->con, "  fatstat <part> <p> - show FAT32 entry info\n");
+    console_printf(sh->con, "Network (Intel e1000):\n");
+    console_printf(sh->con, "  e1000             - probe and init Intel e1000/e1000e\n");
     console_printf(sh->con, "  e1000dump         - print extended e1000 debug registers\n");
     console_printf(sh->con, "  e1000rings        - initialize e1000 RX/TX rings\n");
-    console_printf(sh->con, "  e1000tx           - send one test broadcast Ethernet frame\n");
-    console_printf(sh->con, "  arpwho a b c d    - send ARP request to target IPv4 (raw)\n");
-    console_printf(sh->con, "  net               - bring up the IP stack on top of e1000\n");
+    console_printf(sh->con, "  e1000tx           - send test broadcast Ethernet frame\n");
+    console_printf(sh->con, "  arpwho a b c d    - send ARP request to target IPv4\n");
+    console_printf(sh->con, "  net               - bring up IP stack on e1000\n");
     console_printf(sh->con, "  ipcfg             - print current IP configuration\n");
     console_printf(sh->con, "  ipset ip mask gw  - set local IPv4 / netmask / gateway\n");
     console_printf(sh->con, "  dnsset ip         - set DNS server IPv4 address\n");
     console_printf(sh->con, "  arp               - show ARP cache\n");
     console_printf(sh->con, "  arpclear          - empty the ARP cache\n");
-    console_printf(sh->con, "  ping host         - ICMP echo to IPv4 or hostname (4 packets)\n");
+    console_printf(sh->con, "  ping host         - ICMP echo to IPv4 or hostname\n");
     console_printf(sh->con, "  resolve name      - DNS A-record lookup\n");
+    console_printf(sh->con, "Timer:\n");
     console_printf(sh->con, "  ticks             - show PIT status and tick counter\n");
     console_printf(sh->con, "  uptime            - show uptime based on PIT ticks\n");
     console_printf(sh->con, "  piton             - enable PIT IRQ0 timer\n");
     console_printf(sh->con, "  pitoff            - disable PIT IRQ0 timer\n");
-    console_printf(sh->con, "  echo ...          - print text\n");
-    console_printf(sh->con, "  panic             - trigger kernel panic\n");
-    console_printf(sh->con, "  halt              - stop CPU\n");
-    console_printf(sh->con, "  reboot            - reboot machine\n");
-    console_printf(sh->con, "History:\n");
-    console_printf(sh->con, "  Arrow Up          - previous command\n");
-    console_printf(sh->con, "  Arrow Down        - next command\n");
+    console_printf(sh->con, "Editor:\n");
+    console_printf(sh->con, "  cfe <part> <file> [-kbp-vim] - CFOS text editor\n");
+    console_printf(sh->con, "TCC Compiler:\n");
+    console_printf(sh->con, "  cc <part> <file.c> - compile & run C source from FAT32\n");
+    console_printf(sh->con, "History:  Arrow Up / Arrow Down for command history\n");
 }
 
 static void shell_print_mem(SHELL *sh) {
@@ -1578,6 +1599,367 @@ static void shell_run_fatstat(SHELL *sh, const char *args) {
     }
 }
 
+/* ============================================================
+ *  GNU-like filesystem commands (cd, ls, cp, mv, rm, cat)
+ * ============================================================ */
+
+static void shell_resolve_path(const char *input, char *out, uint32_t out_size) {
+    /* If input starts with '/', it's absolute for current partition */
+    /* If input is relative, prepend cwd */
+    if (input[0] == '/') {
+        uint32_t i = 0;
+        while (input[i] && i < out_size - 1) { out[i] = input[i]; i++; }
+        out[i] = '\0';
+        return;
+    }
+    /* Relative path — combine with cwd */
+    uint32_t i = 0;
+    while (g_cwd[i] && i < out_size - 1) { out[i] = g_cwd[i]; i++; }
+    uint32_t j = 0;
+    /* Remove trailing '/' from cwd if present (except root) */
+    if (i > 1 && out[i-1] == '/') i--;
+    while (input[j] && i < out_size - 1) { out[i++] = input[j++]; }
+    out[i] = '\0';
+}
+
+static PARTITION_INFO *shell_resolve_part(SHELL *sh, const char *name) {
+    if (!name || !name[0]) {
+        if (g_cwd_part) return g_cwd_part;
+        console_printf(sh->con, "No current partition set. Use: cd <part> / or cd <part>\n");
+        return NULL;
+    }
+    /* Try exact name first, then index-based lookup */
+    PARTITION_INFO *part = partition_find_by_name(name);
+    if (!part) {
+        part = shell_find_partition(sh, name);
+    }
+    if (!part) {
+        console_printf(sh->con, "ls: partition '%s' not found\n", name);
+    }
+    return part;
+}
+
+static void shell_run_cd(SHELL *sh, const char *args) {
+    if (!args || !*args) {
+        /* cd with no args — go to root of current partition */
+        g_cwd[0] = '/';
+        g_cwd[1] = '\0';
+        if (g_cwd_part)
+            console_printf(sh->con, "cd: %s:/\n", g_cwd_part->name);
+        else
+            console_printf(sh->con, "cd: / (no partition set)\n");
+        return;
+    }
+
+    /* Parse: cd <part> or cd <part>/path or cd <path> */
+    char part_name[SHELL_CWD_MAX];
+    const char *subpath = NULL;
+    uint32_t i = 0;
+
+    while (args[i] == ' ') i++;
+
+    /* Check if first token is a partition name */
+    uint32_t j = 0;
+    while (args[i] && args[i] != ' ' && args[i] != '/' && j + 1 < sizeof(part_name))
+        part_name[j++] = args[i++];
+    part_name[j] = '\0';
+
+    PARTITION_INFO *part = shell_resolve_part(sh, part_name);
+    if (!part) {
+        /* Maybe it's a path on the current partition */
+        if (g_cwd_part) {
+            subpath = args;
+            part = g_cwd_part;
+            /* Re-parse — entire args is a path */
+            i = 0;
+            while (args[i] == ' ') i++;
+            j = 0;
+            while (args[i] && args[i] != ' ' && j + 1 < sizeof(part_name))
+                part_name[j++] = args[i++];
+            part_name[j] = '\0';
+            subpath = part_name;
+        } else {
+            console_printf(sh->con, "cd: no partition. Usage: cd <part> or cd <part>/path\n");
+            return;
+        }
+    }
+
+    /* Check if there's a path after partition name */
+    if (args[i] == '/') {
+        subpath = &args[i];
+    }
+
+    g_cwd_part = part;
+
+    if (subpath && subpath[0] == '/') {
+        /* Absolute path within partition */
+        uint32_t k = 0;
+        while (subpath[k] && k < SHELL_CWD_MAX - 1) {
+            g_cwd[k] = subpath[k];
+            k++;
+        }
+        g_cwd[k] = '\0';
+    } else if (subpath && subpath[0]) {
+        /* Relative path */
+        shell_resolve_path(subpath, g_cwd, SHELL_CWD_MAX);
+    } else {
+        /* Just partition — go to root */
+        g_cwd[0] = '/';
+        g_cwd[1] = '\0';
+    }
+
+    /* Validate: try to list the directory */
+    if (!fat32_list_directory(sh->con, part, g_cwd)) {
+        console_printf(sh->con, "cd: '%s' on %s is not a valid directory\n", g_cwd, part->name);
+        g_cwd[0] = '/';
+        g_cwd[1] = '\0';
+        return;
+    }
+
+    console_printf(sh->con, "cd: %s:%s\n", part->name, g_cwd);
+}
+
+static void shell_run_ls(SHELL *sh, const char *args) {
+    if (!g_cwd_part) {
+        console_printf(sh->con, "ls: no partition set. Use 'cd <part>' first.\n");
+        return;
+    }
+
+    char path[SHELL_CWD_MAX];
+    const char *target = g_cwd;
+
+    if (args && *args) {
+        if (args[0] == '/') {
+            /* Absolute path */
+            uint32_t k = 0;
+            while (args[k] && k < sizeof(path) - 1) { path[k] = args[k]; k++; }
+            path[k] = '\0';
+            target = path;
+        } else {
+            shell_resolve_path(args, path, sizeof(path));
+            target = path;
+        }
+    }
+
+    if (!fat32_list_directory(sh->con, g_cwd_part, target)) {
+        console_printf(sh->con, "ls: cannot list '%s'\n", target);
+    }
+}
+
+static void shell_run_cat(SHELL *sh, const char *args) {
+    if (!g_cwd_part) {
+        console_printf(sh->con, "cat: no partition set\n");
+        return;
+    }
+
+    char path[SHELL_CWD_MAX];
+    if (!args || !*args) {
+        console_printf(sh->con, "cat: missing file argument\n");
+        return;
+    }
+
+    if (args[0] == '/') {
+        uint32_t k = 0;
+        while (args[k] && k < sizeof(path) - 1) { path[k] = args[k]; k++; }
+        path[k] = '\0';
+    } else {
+        shell_resolve_path(args, path, sizeof(path));
+    }
+
+    if (!fat32_cat_file(sh->con, g_cwd_part, path)) {
+        console_printf(sh->con, "cat: cannot read '%s'\n", path);
+    }
+}
+
+static void shell_run_cp(SHELL *sh, const char *args) {
+    /* cp <src> <dst> — both on current partition */
+    char src_path[SHELL_CWD_MAX];
+    char dst_path[SHELL_CWD_MAX];
+    uint8_t *data = NULL;
+    uint32_t data_size = 0;
+    uint32_t i = 0;
+
+    if (!g_cwd_part) {
+        console_printf(sh->con, "cp: no partition set\n");
+        return;
+    }
+
+    /* Parse src */
+    while (args[i] == ' ') i++;
+    uint32_t j = 0;
+    while (args[i] && args[i] != ' ' && j + 1 < sizeof(src_path))
+        src_path[j++] = args[i++];
+    src_path[j] = '\0';
+
+    /* Parse dst */
+    while (args[i] == ' ') i++;
+    j = 0;
+    while (args[i] && args[i] != ' ' && j + 1 < sizeof(dst_path))
+        dst_path[j++] = args[i++];
+    dst_path[j] = '\0';
+
+    if (!src_path[0] || !dst_path[0]) {
+        console_printf(sh->con, "Usage: cp <src> <dst>\n");
+        return;
+    }
+
+    /* Resolve paths */
+    char src_resolved[SHELL_CWD_MAX];
+    char dst_resolved[SHELL_CWD_MAX];
+    if (src_path[0] == '/') {
+        uint32_t k = 0; while (src_path[k] && k < sizeof(src_resolved)-1) { src_resolved[k] = src_path[k]; k++; }
+        src_resolved[k] = '\0';
+    } else {
+        shell_resolve_path(src_path, src_resolved, sizeof(src_resolved));
+    }
+    if (dst_path[0] == '/') {
+        uint32_t k = 0; while (dst_path[k] && k < sizeof(dst_resolved)-1) { dst_resolved[k] = dst_path[k]; k++; }
+        dst_resolved[k] = '\0';
+    } else {
+        shell_resolve_path(dst_path, dst_resolved, sizeof(dst_resolved));
+    }
+
+    /* Read source file */
+    if (!fat32_read_file(g_cwd_part, src_resolved, &data, &data_size)) {
+        console_printf(sh->con, "cp: cannot read '%s'\n", src_resolved);
+        return;
+    }
+
+    /* Try to write dst (overwrite). If file doesn't exist, create first. */
+    if (!fat32_write_file(sh->con, g_cwd_part, dst_resolved, data, data_size)) {
+        if (fat32_create_file(sh->con, g_cwd_part, dst_resolved)) {
+            if (!fat32_write_file(sh->con, g_cwd_part, dst_resolved, data, data_size)) {
+                console_printf(sh->con, "cp: failed to write '%s'\n", dst_resolved);
+                kfree(data);
+                return;
+            }
+        } else {
+            console_printf(sh->con, "cp: failed to create '%s'\n", dst_resolved);
+            kfree(data);
+            return;
+        }
+    }
+
+    kfree(data);
+    console_printf(sh->con, "cp: '%s' -> '%s' (%u bytes)\n", src_resolved, dst_resolved, data_size);
+}
+
+static void shell_run_mv(SHELL *sh, const char *args) {
+    /* mv <old> <new> — rename within same partition */
+    char old_path[SHELL_CWD_MAX];
+    char new_path[SHELL_CWD_MAX];
+    uint32_t i = 0;
+
+    if (!g_cwd_part) {
+        console_printf(sh->con, "mv: no partition set\n");
+        return;
+    }
+
+    while (args[i] == ' ') i++;
+    uint32_t j = 0;
+    while (args[i] && args[i] != ' ' && j + 1 < sizeof(old_path))
+        old_path[j++] = args[i++];
+    old_path[j] = '\0';
+
+    while (args[i] == ' ') i++;
+    j = 0;
+    while (args[i] && args[i] != ' ' && j + 1 < sizeof(new_path))
+        new_path[j++] = args[i++];
+    new_path[j] = '\0';
+
+    if (!old_path[0] || !new_path[0]) {
+        console_printf(sh->con, "Usage: mv <old> <new>\n");
+        return;
+    }
+
+    /* Resolve paths */
+    char old_resolved[SHELL_CWD_MAX];
+    char new_resolved[SHELL_CWD_MAX];
+    if (old_path[0] == '/') {
+        uint32_t k = 0; while (old_path[k] && k < sizeof(old_resolved)-1) { old_resolved[k] = old_path[k]; k++; }
+        old_resolved[k] = '\0';
+    } else {
+        shell_resolve_path(old_path, old_resolved, sizeof(old_resolved));
+    }
+    if (new_path[0] == '/') {
+        uint32_t k = 0; while (new_path[k] && k < sizeof(new_resolved)-1) { new_resolved[k] = new_path[k]; k++; }
+        new_resolved[k] = '\0';
+    } else {
+        shell_resolve_path(new_path, new_resolved, sizeof(new_resolved));
+    }
+
+    if (!fat32_rename(sh->con, g_cwd_part, old_resolved, new_resolved)) {
+        console_printf(sh->con, "mv: failed to rename '%s' -> '%s'\n", old_resolved, new_resolved);
+    }
+}
+
+static void shell_run_rm(SHELL *sh, const char *args) {
+    if (!g_cwd_part) {
+        console_printf(sh->con, "rm: no partition set\n");
+        return;
+    }
+
+    char path[SHELL_CWD_MAX];
+    if (!args || !*args) {
+        console_printf(sh->con, "rm: missing file argument\n");
+        return;
+    }
+
+    if (args[0] == '/') {
+        uint32_t k = 0;
+        while (args[k] && k < sizeof(path) - 1) { path[k] = args[k]; k++; }
+        path[k] = '\0';
+    } else {
+        shell_resolve_path(args, path, sizeof(path));
+    }
+
+    if (!fat32_delete_file(sh->con, g_cwd_part, path)) {
+        console_printf(sh->con, "rm: failed to delete '%s'\n", path);
+    } else {
+        console_printf(sh->con, "rm: deleted '%s'\n", path);
+    }
+}
+
+static void shell_run_pwd(SHELL *sh) {
+    if (g_cwd_part) {
+        console_printf(sh->con, "%s:%s\n", g_cwd_part->name, g_cwd);
+    } else {
+        console_printf(sh->con, "(no partition set)\n");
+    }
+}
+
+static void shell_run_touch(SHELL *sh, const char *args) {
+    if (!g_cwd_part) {
+        console_printf(sh->con, "touch: no partition set\n");
+        return;
+    }
+
+    char path[SHELL_CWD_MAX];
+    if (!args || !*args) {
+        console_printf(sh->con, "touch: missing file argument\n");
+        return;
+    }
+
+    if (args[0] == '/') {
+        uint32_t k = 0;
+        while (args[k] && k < sizeof(path) - 1) { path[k] = args[k]; k++; }
+        path[k] = '\0';
+    } else {
+        shell_resolve_path(args, path, sizeof(path));
+    }
+
+    /* Try write first (file exists), else create */
+    const char empty = '\n';
+    if (!fat32_write_file(sh->con, g_cwd_part, path, &empty, 1)) {
+        if (!fat32_create_file(sh->con, g_cwd_part, path)) {
+            console_printf(sh->con, "touch: failed to create '%s'\n", path);
+            return;
+        }
+    }
+    console_printf(sh->con, "touch: '%s'\n", path);
+}
+
+
 static void shell_execute(SHELL *sh) {
     if (sh->length == 0) {
         return;
@@ -1869,6 +2251,101 @@ static void shell_execute(SHELL *sh) {
 
     if (str_eq(sh->input, "echo")) {
         console_printf(sh->con, "\n");
+        return;
+    }
+
+    /* GNU-like filesystem commands */
+    if (str_starts_with(sh->input, "cd ")) {
+        shell_run_cd(sh, sh->input + 3);
+        return;
+    }
+    if (str_eq(sh->input, "cd")) {
+        shell_run_cd(sh, NULL);
+        return;
+    }
+
+    if (str_starts_with(sh->input, "ls ")) {
+        shell_run_ls(sh, sh->input + 3);
+        return;
+    }
+    if (str_eq(sh->input, "ls")) {
+        shell_run_ls(sh, NULL);
+        return;
+    }
+
+    if (str_starts_with(sh->input, "cat ")) {
+        shell_run_cat(sh, sh->input + 4);
+        return;
+    }
+
+    if (str_starts_with(sh->input, "cp ")) {
+        shell_run_cp(sh, sh->input + 3);
+        return;
+    }
+
+    if (str_starts_with(sh->input, "mv ")) {
+        shell_run_mv(sh, sh->input + 3);
+        return;
+    }
+
+    if (str_starts_with(sh->input, "rm ")) {
+        shell_run_rm(sh, sh->input + 3);
+        return;
+    }
+
+    if (str_eq(sh->input, "pwd")) {
+        shell_run_pwd(sh);
+        return;
+    }
+
+    if (str_starts_with(sh->input, "touch ")) {
+        shell_run_touch(sh, sh->input + 6);
+        return;
+    }
+
+    /* TCC commands */
+    if (str_starts_with(sh->input, "cc ") || str_eq(sh->input, "cc")) {
+        shell_tcc_dispatch(sh);
+        return;
+    }
+
+    /* CFE Editor */
+    if (str_starts_with(sh->input, "cfe ")) {
+        const char *args = sh->input + 4;
+        char part_arg[PARTITION_NAME_MAX];
+        char file_arg[FAT32_NAME_MAX];
+        int vim_preset = 0;
+        uint32_t i = 0;
+
+        while (args[i] == ' ') i++;
+        uint32_t j = 0;
+        while (args[i] && args[i] != ' ' && j + 1 < sizeof(part_arg)) part_arg[j++] = args[i++];
+        part_arg[j] = '\0';
+
+        while (args[i] == ' ') i++;
+        j = 0;
+        while (args[i] && args[i] != ' ' && j + 1 < sizeof(file_arg)) file_arg[j++] = args[i++];
+        file_arg[j] = '\0';
+
+        /* Check for -kbp-vim flag */
+        while (args[i] == ' ') i++;
+        if (str_eq(&args[i], "-kbp-vim")) {
+            vim_preset = 1;
+        }
+
+        if (!part_arg[0] || !file_arg[0]) {
+            console_printf(sh->con, "Usage: cfe <part> <file> [-kbp-vim]\n");
+            console_printf(sh->con, "Example: cfe p0 hello.c -kbp-vim\n");
+            return;
+        }
+
+        PARTITION_INFO *part = partition_find_by_name(part_arg);
+        if (!part) {
+            part = shell_find_partition(sh, part_arg);
+        }
+        if (!part) return;
+
+        cfe_run(sh->con, part, file_arg, vim_preset);
         return;
     }
 

@@ -41,7 +41,7 @@ static void print_dec(EFI_SYSTEM_TABLE *st, UINT64 value) {
 static void draw_menu(EFI_SYSTEM_TABLE *st, BOOT_CONFIG *config, UINTN selected) {
     st->ConOut->ClearScreen(st->ConOut);
 
-    print(st, L"MyOS bootloader\r\n");
+    print(st, L"CFOS bootloader\r\n");
     print(st, L"Boot menu\r\n\r\n");
 
     for (UINTN i = 0; i < config->entry_count; i++) {
@@ -124,7 +124,7 @@ UINTN run_menu(
 
         if (key.UnicodeChar == CHAR_CR) {
             st->ConOut->ClearScreen(st->ConOut);
-            print(st, L"MyOS bootloader\r\n");
+            print(st, L"CFOS bootloader\r\n");
             print(st, L"Boot menu\r\n\r\n");
             print(st, L"Booting selected entry...\r\n\r\n");
             return selected;
@@ -132,7 +132,7 @@ UINTN run_menu(
 
         if (key.ScanCode == SCAN_ESC) {
             st->ConOut->ClearScreen(st->ConOut);
-            print(st, L"MyOS bootloader\r\n");
+            print(st, L"CFOS bootloader\r\n");
             print(st, L"Boot menu\r\n\r\n");
             print(st, L"Escape pressed, booting default entry...\r\n\r\n");
             return config->default_entry;

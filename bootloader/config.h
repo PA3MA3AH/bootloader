@@ -14,6 +14,7 @@ typedef struct {
     BOOT_ENTRY_TYPE type;
     CHAR16 name[64];
     CHAR16 kernel_path[128];
+    CHAR16 initrd_path[128];
 } BOOT_ENTRY;
 
 typedef struct {

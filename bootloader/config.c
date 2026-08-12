@@ -195,6 +195,7 @@ static EFI_STATUS parse_single_entry_cfg(
     entry->type = BOOT_ENTRY_TYPE_ELF;
     entry->name[0] = 0;
     entry->kernel_path[0] = 0;
+    entry->initrd_path[0] = 0;
 
     UINTN i = 0;
 
@@ -295,6 +296,31 @@ static EFI_STATUS parse_single_entry_cfg(
             continue;
         }
 
+        if (i + 7 <= read_size &&
+            buffer[i+0] == 'i' &&
+            buffer[i+1] == 'n' &&
+            buffer[i+2] == 'i' &&
+            buffer[i+3] == 't' &&
+            buffer[i+4] == 'r' &&
+            buffer[i+5] == 'd' &&
+            buffer[i+6] == '=') {
+
+            i += 7;
+
+            UINTN start = i;
+            while (i < read_size && buffer[i] != '\r' && buffer[i] != '\n') {
+                i++;
+            }
+            UINTN end = i;
+            trim_ascii_range(buffer, &start, &end);
+
+            if (end > start) {
+                ascii_to_char16(entry->initrd_path, 128, &buffer[start], end - start);
+            }
+
+            continue;
+        }
+
         while (i < read_size && buffer[i] != '\n') {
             i++;
         }
@@ -354,6 +380,7 @@ static void add_entry_from_cfg_if_kernel_exists(
     dst->type = temp.type;
     char16_copy(dst->name, 64, temp.name);
     char16_copy(dst->kernel_path, 128, temp.kernel_path);
+    char16_copy(dst->initrd_path, 128, temp.initrd_path);
 }
 
 static void load_dynamic_entries(
@@ -549,6 +576,8 @@ EFI_STATUS load_config(
             config->entry_count++;
 
             current->type = BOOT_ENTRY_TYPE_ELF;
+            current->kernel_path[0] = 0;
+            current->initrd_path[0] = 0;
 
             i++;
 
@@ -610,6 +639,49 @@ EFI_STATUS load_config(
                 if (path_end > path_start) {
                     ascii_to_char16(
                         current->kernel_path,
+                        128,
+                        &buffer[path_start],
+                        path_end - path_start
+                    );
+                }
+            }
+
+            continue;
+        }
+
+        if (i + 7 <= read_size &&
+            buffer[i+0] == 'i' &&
+            buffer[i+1] == 'n' &&
+            buffer[i+2] == 'i' &&
+            buffer[i+3] == 't' &&
+            buffer[i+4] == 'r' &&
+            buffer[i+5] == 'd' &&
+            buffer[i+6] == '=') {
+
+            i += 7;
+
+            while (i < read_size && ascii_is_space(buffer[i])) {
+                i++;
+            }
+
+            if (current) {
+                UINTN path_start = i;
+
+                while (i < read_size &&
+                       buffer[i] != '\r' &&
+                       buffer[i] != '\n' &&
+                       buffer[i] != '}') {
+                    i++;
+                }
+
+                UINTN path_end = i;
+                while (path_end > path_start && ascii_is_space(buffer[path_end - 1])) {
+                    path_end--;
+                }
+
+                if (path_end > path_start) {
+                    ascii_to_char16(
+                        current->initrd_path,
                         128,
                         &buffer[path_start],
                         path_end - path_start

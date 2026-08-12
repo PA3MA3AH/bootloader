@@ -3,6 +3,14 @@
 
 #include <stdint.h>
 
+/* --------------------------------------------------------------------------
+ * Modifier bitmask -- returned by keyboard_get_modifiers()
+ * -------------------------------------------------------------------------- */
+
+#define MOD_SHIFT  0x04
+#define MOD_CTRL   0x01
+#define MOD_ALT    0x02
+
 typedef enum {
     KEY_NONE = 0,
     KEY_F1 = 0x80,
@@ -18,7 +26,10 @@ typedef enum {
     KEY_F11,
     KEY_F12,
     KEY_ARROW_UP,
-    KEY_ARROW_DOWN
+    KEY_ARROW_DOWN,
+    KEY_ESCAPE,
+    KEY_ARROW_LEFT,
+    KEY_ARROW_RIGHT,
 } KEY_CODE;
 
 void keyboard_init(void);
@@ -35,5 +46,9 @@ char keyboard_getchar(void);
 void keyboard_irq_handler(void);
 int keyboard_buffer_has_data(void);
 char keyboard_buffer_getchar(void);
+char keyboard_buffer_peek(void);
+
+/* modifier state */
+uint8_t keyboard_get_modifiers(void);
 
 #endif

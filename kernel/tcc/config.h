@@ -1,0 +1,24 @@
+#ifndef TCC_CONFIG_H
+#define TCC_CONFIG_H
+
+#define CONFIG_TCCDIR ""
+#define CONFIG_TCC_STATIC 1
+#define CONFIG_TCC_PREDEFS 1
+#undef CONFIG_TCC_BCHECK
+#undef CONFIG_TCC_ASM
+#define CONFIG_TCC_LIBTCC 1
+
+#define TCC_TARGET_X86_64 1
+#undef TCC_TARGET_I386
+#undef TCC_TARGET_ARM
+#undef TCC_TARGET_ARM64
+#undef TCC_TARGET_RISCV64
+#undef TCC_TARGET_C67
+#undef CONFIG_TCC_PE
+#undef CONFIG_TCC_MACHO
+#undef CONFIG_TCC_COFF
+
+/* Disable threading in kernel mode */
+#define CONFIG_TCC_SEMLOCK 0
+
+#endif

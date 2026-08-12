@@ -646,7 +646,7 @@ int e1000_send_packet(E1000_INFO *info, const void *data, uint16_t length) {
 
 int e1000_send_test_packet(E1000_INFO *info) {
     uint8_t frame[60];
-    const char payload[] = "MyOS e1000 test packet";
+    const char payload[] = "CFOS e1000 test packet";
     uint32_t payload_len = (uint32_t)(sizeof(payload) - 1U);
     uint32_t i;
     uint16_t ethertype = 0x88B5;
